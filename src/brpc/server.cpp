@@ -1190,15 +1190,16 @@ int Server::Stop(int timeout_ms) {
 
 // NOTE: Join() can happen before Stop().
 int Server::Join() {
-    if (_status != RUNNING && _status != STOPPING) {
-        return -1;
+    bool need_join = _status == RUNNING || _status == STOPPING;
+    if (need_join) {
+        if (_am) {
+            _am->Join();
+        }
+        if (_internal_am) {
+            _internal_am->Join();
+        }
     }
-    if (_am) {
-        _am->Join();
-    }
-    if (_internal_am) {
-        _internal_am->Join();
-    }
+
 
     if (_session_local_data_pool) {
         // We can't delete the pool right here because there's a bvar watching
@@ -1223,6 +1224,10 @@ int Server::Join() {
     if (_tl_options.tls_key != INVALID_BTHREAD_KEY) {
         CHECK_EQ(0, bthread_key_delete(_tl_options.tls_key));
         _tl_options.tls_key = INVALID_BTHREAD_KEY;
+    }
+
+    if (!need_join) {
+        return -1;
     }
 
     // Have to join _derivative_thread, which may assume that server is running
