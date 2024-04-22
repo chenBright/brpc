@@ -138,6 +138,17 @@ void SerializeRequestDefault(butil::IOBuf* buf,
             EREQUEST, "Missing required fields in request: %s",
             request->InitializationErrorString().c_str());
     }
+    if (cntl->request_protocol() == PROTOCOL_BAIDU_STD &&
+        cntl->is_baidu_generic_call()) {
+        if (request->GetDescriptor() != BaiduGenericMessage::descriptor()) {
+            cntl->SetFailed(
+                EREQUEST,
+                "Missing BaiduGenericMessage in baidu generic call");
+        } else {
+            buf->append(*((BaiduGenericMessage*)request)->raw_data());
+        }
+        return;
+    }
     if (!SerializeAsCompressedData(*request, buf, cntl->request_compress_type())) {
         return cntl->SetFailed(
             EREQUEST, "Fail to compress request, compress_type=%d",

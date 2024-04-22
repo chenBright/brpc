@@ -396,7 +396,7 @@ static void GlobalInitializeOrDieImpl() {
     Protocol baidu_protocol = { ParseRpcMessage,
                                 SerializeRequestDefault, PackRpcRequest,
                                 ProcessRpcRequest, ProcessRpcResponse,
-                                VerifyRpcRequest, NULL, NULL,
+                                VerifyRpcRequest, NULL, GetRpcMethodName,
                                 CONNECTION_TYPE_ALL, "baidu_std" };
     if (RegisterProtocol(PROTOCOL_BAIDU_STD, baidu_protocol) != 0) {
         exit(1);

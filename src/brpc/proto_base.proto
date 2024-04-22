@@ -32,3 +32,5 @@ message NsheadMessageBase {}
 message SerializedRequestBase {}
 
 message ThriftFramedMessageBase {}
+
+message BaiduGenericMessageBase {}

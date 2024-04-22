@@ -44,6 +44,7 @@
 #include "brpc/rpc_dump.h"
 #include "brpc/details/usercode_backup_pool.h"  // RunUserCode
 #include "brpc/mongo_service_adaptor.h"
+#include "brpc/baidu_generic_message.h"
 
 // Force linking the .o in UT (which analysis deps by inclusions)
 #include "brpc/parallel_channel.h"
@@ -277,6 +278,7 @@ void Controller::ResetPods() {
     _accessed = NULL;
     _pack_request = NULL;
     _method = NULL;
+    _baidu_generic_method = NULL;
     _auth = NULL;
     _idl_names = idl_single_req_single_res;
     _idl_result = IDL_VOID_RESULT;
@@ -1483,6 +1485,10 @@ int Controller::GetSockOption(int level, int optname, void* optval, socklen_t* o
         return -1;
     }
 }
+
+// void Controller::set_baidu_generic_method(const BaiduGenericMethod* method) {
+//     _baidu_generic_method = new BaiduGenericMethod(*method);
+// }
 
 #if defined(OS_MACOSX)
 typedef sig_t SignalHandler;

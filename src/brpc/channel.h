@@ -35,6 +35,7 @@
 #include "brpc/details/profiler_linker.h"
 #include "brpc/retry_policy.h"
 #include "brpc/naming_service_filter.h"
+#include "brpc/policy/baidu_rpc_protocol.h"
 
 namespace brpc {
 
@@ -152,8 +153,8 @@ class Channel : public ChannelBase {
 friend class Controller;
 friend class SelectiveChannel;
 public:
-    Channel(ProfilerLinker = ProfilerLinker());
-    ~Channel();
+    explicit Channel(ProfilerLinker = ProfilerLinker());
+    ~Channel() override;
 
     // Connect this channel to a single server whose address is given by the
     // first parameter. Use default options if `options' is NULL.
@@ -193,18 +194,24 @@ public:
                     google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request,
                     google::protobuf::Message* response,
-                    google::protobuf::Closure* done);
+                    google::protobuf::Closure* done) override;
+
+    // void CallGenericMethod(const policy::GenericMethod* method,
+    //     google::protobuf::RpcController* controller_base,
+    //     const std::string* request,
+    //     std::string* response,
+    //     google::protobuf::Closure* done);
 
     // Get current options.
     const ChannelOptions& options() const { return _options; }
 
-    void Describe(std::ostream&, const DescribeOptions&) const;
+    void Describe(std::ostream&, const DescribeOptions&) const override;
 
     // Sum of weights of servers that this channel connects to.
-    int Weight();
+    int Weight() override;
 
 protected:
-    int CheckHealth();
+    int CheckHealth() override;
 
     bool SingleServer() const { return _lb.get() == NULL; }
 

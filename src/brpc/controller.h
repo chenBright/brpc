@@ -45,6 +45,8 @@
 #include "brpc/progressive_reader.h"           // ProgressiveReader
 #include "brpc/grpc.h"
 #include "brpc/kvmap.h"
+#include "brpc/baidu_generic_message.h"
+#include "brpc/policy/baidu_rpc_meta.pb.h"
 
 // EAUTH is defined in MAC
 #ifndef EAUTH
@@ -317,7 +319,8 @@ public:
     // may wish to suppress the error completely. To do this, call this
     // method before doing the RPC.
     void ignore_eovercrowded() { add_flag(FLAGS_IGNORE_EOVERCROWDED); }
-    
+
+    // todo 设置plain_data_type？
     // Set if the field of bytes in protobuf message should be encoded
     // to base64 string in HTTP request.
     void set_pb_bytes_to_base64(bool f) { set_flag(FLAGS_PB_BYTES_TO_BASE64, f); }
@@ -579,6 +582,26 @@ public:
     // -1 means no deadline.
     int64_t deadline_us() const { return _deadline_us; }
 
+    void set_baidu_generic_method(const BaiduGenericMethod* method) {
+        _baidu_generic_method = new BaiduGenericMethod(*method);
+    }
+
+    const BaiduGenericMethod*  baidu_generic_call() const {
+        return _baidu_generic_method;
+    }
+
+    bool is_baidu_generic_call() const {
+        return _baidu_generic_method != NULL;
+    }
+
+    void set_request_plain_data_type(policy::PlainDataType type) {
+        _request_plain_data_type = type;
+    }
+
+    policy::PlainDataType set_request_plain_data_type() {
+        return _request_plain_data_type;
+    }
+
 private:
     struct CompletionInfo {
         CallId id;           // call_id of the corresponding request
@@ -803,10 +826,13 @@ private:
     // Fields will be used when making requests
     Protocol::PackRequest _pack_request;
     const google::protobuf::MethodDescriptor* _method;
+    const BaiduGenericMethod* _baidu_generic_method;
     const Authenticator* _auth;
     butil::IOBuf _request_buf;
     IdlNames _idl_names;
     int64_t _idl_result;
+
+    policy::PlainDataType _request_plain_data_type;
 
     HttpHeader* _http_request;
     HttpHeader* _http_response;

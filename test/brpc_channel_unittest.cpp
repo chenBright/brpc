@@ -227,10 +227,10 @@ protected:
             butil::IOBuf req_buf;
             msg->payload.cutn(&req_buf, msg->payload.size() - meta.attachment_size());
             butil::IOBufAsZeroCopyInputStream wrapper2(req_buf);
-            EXPECT_TRUE(req->ParseFromZeroCopyStream(&wrapper2));
+            ASSERT_TRUE(req->ParseFromZeroCopyStream(&wrapper2));
         } else {
             butil::IOBufAsZeroCopyInputStream wrapper2(msg->payload);
-            EXPECT_TRUE(req->ParseFromZeroCopyStream(&wrapper2));
+            ASSERT_TRUE(req->ParseFromZeroCopyStream(&wrapper2)) << msg->payload.size();
         }
         brpc::Controller* cntl = new brpc::Controller();
         cntl->_current_call.peer_id = ptr->id();
@@ -302,6 +302,34 @@ protected:
             done = brpc::DoNothing();
         }
         ::test::EchoService::Stub(channel).Echo(cntl, req, res, done);
+        if (async) {
+            if (destroy) {
+                delete channel;
+            }
+            // Callback MUST be called for once and only once
+            bthread_id_join(sync_id);
+        }
+    }
+
+    void CallMethod(brpc::Channel* channel,
+                    brpc::Controller* cntl,
+                    test::EchoRequest* req,
+                    std::string* res,
+                    bool async, bool destroy = false) {
+        google::protobuf::Closure* done = NULL;
+        brpc::CallId sync_id = { 0 };
+        if (async) {
+            sync_id = cntl->call_id();
+            done = brpc::DoNothing();
+        }
+        brpc::BaiduGenericMethod method;
+        method.name = "Echo";
+        method.full_name = "test.EchoService.Echo";
+        method.service_name = "EchoService";
+        method.service_full_name = "test.EchoService";
+        std::string req_str;
+        req->SerializeToString(&req_str);
+        brpc::BaiduGenericStub(channel).CallMethod(&method, cntl, &req_str, res, done);
         if (async) {
             if (destroy) {
                 delete channel;
@@ -479,6 +507,89 @@ protected:
             EXPECT_EQ(0, cntl.ErrorCode())
                 << single_server << ", " << async << ", " << short_connection;
             EXPECT_EQ(receiving_socket_id2, res.receiving_socket_id());
+        }
+        StopAndJoin();
+    }
+
+    void TestSuccessGenericCall(bool single_server, bool async, bool short_connection) {
+        std::cout << " *** single=" << single_server
+                  << " async=" << async
+                  << " short=" << short_connection << std::endl;
+
+        ASSERT_EQ(0, StartAccept(_ep));
+        brpc::Channel channel;
+        SetUpChannel(&channel, single_server, short_connection);
+
+        brpc::Controller cntl;
+        test::EchoRequest req;
+        test::EchoResponse res;
+        req.set_message(__FUNCTION__);
+        std::string res_str;
+        CallMethod(&channel, &cntl, &req, &res_str, async);
+
+        ASSERT_EQ(0, cntl.ErrorCode())
+                    << single_server << ", " << async << ", " << short_connection;
+        ASSERT_TRUE(brpc::ParsePbFromString(&res, res_str));
+        const uint64_t receiving_socket_id = res.receiving_socket_id();
+        ASSERT_EQ(0, cntl.sub_count());
+        ASSERT_TRUE(NULL == cntl.sub(-1));
+        ASSERT_TRUE(NULL == cntl.sub(0));
+        ASSERT_TRUE(NULL == cntl.sub(1));
+        ASSERT_EQ("received " + std::string(__FUNCTION__), res.message());
+        if (short_connection) {
+            // Sleep to let `_messenger' detect `Socket' being `SetFailed'
+            const int64_t start_time = butil::gettimeofday_us();
+            while (_messenger.ConnectionCount() != 0) {
+                ASSERT_LT(butil::gettimeofday_us(), start_time + 100000L/*100ms*/);
+                bthread_usleep(1000);
+            }
+        } else {
+            ASSERT_GE(1ul, _messenger.ConnectionCount());
+        }
+        if (single_server && !short_connection) {
+            // Reuse the connection
+            brpc::Channel channel2;
+            SetUpChannel(&channel2, single_server, short_connection);
+            cntl.Reset();
+            req.Clear();
+            res.Clear();
+            res_str.clear();
+            req.set_message(__FUNCTION__);
+            CallMethod(&channel2, &cntl, &req, &res_str, async);
+            ASSERT_EQ(0, cntl.ErrorCode())
+                        << single_server << ", " << async << ", " << short_connection;
+            ASSERT_TRUE(brpc::ParsePbFromString(&res, res_str));
+            ASSERT_EQ(receiving_socket_id, res.receiving_socket_id());
+
+            // A different connection_group does not reuse the connection
+            brpc::Channel channel3;
+            SetUpChannel(&channel3, single_server, short_connection,
+                NULL, "another_group");
+            cntl.Reset();
+            req.Clear();
+            res.Clear();
+            res_str.clear();
+            req.set_message(__FUNCTION__);
+            CallMethod(&channel3, &cntl, &req, &res_str, async);
+            ASSERT_EQ(0, cntl.ErrorCode())
+                        << single_server << ", " << async << ", " << short_connection;
+            ASSERT_TRUE(brpc::ParsePbFromString(&res, res_str));
+            const uint64_t receiving_socket_id2 = res.receiving_socket_id();
+            ASSERT_NE(receiving_socket_id, receiving_socket_id2);
+
+            // Channel in the same connection_group reuses the connection
+            // note that the leading/trailing spaces should be trimed.
+            brpc::Channel channel4;
+            SetUpChannel(&channel4, single_server, short_connection,
+                NULL, " another_group ");
+            cntl.Reset();
+            req.Clear();
+            res.Clear();
+            req.set_message(__FUNCTION__);
+            CallMethod(&channel4, &cntl, &req, &res, async);
+            ASSERT_EQ(0, cntl.ErrorCode())
+                        << single_server << ", " << async << ", " << short_connection;
+            ASSERT_EQ(receiving_socket_id2, res.receiving_socket_id());
         }
         StopAndJoin();
     }
@@ -2232,8 +2343,18 @@ TEST_F(ChannelTest, success) {
     }
 }
 
+TEST_F(ChannelTest, success_generic_call) {
+    for (int i = 0; i <= 1; ++i) { // Flag SingleServer
+        for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
+            for (int k = 0; k <= 1; ++k) { // Flag ShortConnection
+                TestSuccessGenericCall(i, j, k);
+            }
+        }
+    }
+}
+
 TEST_F(ChannelTest, success_parallel) {
-    for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
+    for (int i = 0; i <= 1; ++i) { // Flag SingleServer
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
             for (int k = 0; k <=1; ++k) { // Flag ShortConnection
                 TestSuccessParallel(i, j, k);

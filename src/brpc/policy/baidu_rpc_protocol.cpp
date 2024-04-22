@@ -421,15 +421,34 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
             break;
         }
 
+
+        // google::protobuf::Service* svc = NULL;
+        if (server->options().baidu_master_service) {
+            // If http_master_service is on, just call it.
+            google::protobuf::Service* svc = server->options().http_master_service;
+            const google::protobuf::MethodDescriptor* md =
+                svc->GetDescriptor()->FindMethodByName("default_method");
+            if (md == NULL) {
+                cntl->SetFailed(ENOMETHOD, "No default_method in baidu_master_service");
+                return;
+            }
+            accessor.set_method(md);
+            if (span) {
+                span->ResetServerSpanName(md->full_name());
+                span->set_start_callback_us(butil::cpuwide_time_us());
+                span->AsParent();
+            }
+        }
+
         // NOTE(gejun): jprotobuf sends service names without packages. So the
         // name should be changed to full when it's not.
         butil::StringPiece svc_name(request_meta.service_name());
-        if (svc_name.find('.') == butil::StringPiece::npos) {
+        if (svc_name.find('.')==butil::StringPiece::npos) {
             const Server::ServiceProperty* sp =
                 server_accessor.FindServicePropertyByName(svc_name);
-            if (NULL == sp) {
+            if (NULL==sp) {
                 cntl->SetFailed(ENOSERVICE, "Fail to find service=%s",
-                                request_meta.service_name().c_str());
+                    request_meta.service_name().c_str());
                 break;
             }
             svc_name = sp->service->GetDescriptor()->full_name();
@@ -437,13 +456,14 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
         const Server::MethodProperty* mp =
             server_accessor.FindMethodPropertyByFullName(
                 svc_name, request_meta.method_name());
-        if (NULL == mp) {
+        if (NULL==mp) {
             cntl->SetFailed(ENOMETHOD, "Fail to find method=%s/%s",
-                            request_meta.service_name().c_str(),
-                            request_meta.method_name().c_str());
+                request_meta.service_name().c_str(),
+                request_meta.method_name().c_str());
             break;
-        } else if (mp->service->GetDescriptor()
-                   == BadMethodService::descriptor()) {
+        }
+        else if (mp->service->GetDescriptor()
+            ==BadMethodService::descriptor()) {
             BadMethodRequest breq;
             BadMethodResponse bres;
             breq.set_service_name(request_meta.service_name());
@@ -457,7 +477,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
             int rejected_cc = 0;
             if (!method_status->OnRequested(&rejected_cc, cntl.get())) {
                 cntl->SetFailed(ELIMIT, "Rejected by %s's ConcurrencyLimiter, concurrency=%d",
-                                mp->method->full_name().c_str(), rejected_cc);
+                    mp->method->full_name().c_str(), rejected_cc);
                 break;
             }
         }
@@ -465,13 +485,14 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
         const google::protobuf::MethodDescriptor* method = mp->method;
         accessor.set_method(method);
 
+        if (span) {
+            span->ResetServerSpanName(method->full_name());
+        }
+
+
 
         if (!server->AcceptRequest(cntl.get())) {
             break;
-        }
-
-        if (span) {
-            span->ResetServerSpanName(method->full_name());
         }
         const int req_size = static_cast<int>(msg->payload.size());
         butil::IOBuf req_buf;
@@ -627,7 +648,9 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
 
         const CompressType res_cmp_type = (CompressType)meta.compress_type();
         cntl->set_response_compress_type(res_cmp_type);
-        if (cntl->response()) {
+        if (cntl->is_baidu_generic_call()) {
+            res_buf_ptr->cutn(((BaiduGenericMessage*)cntl->response())->raw_data(), res_buf_ptr->size());
+        } else if (cntl->response()) {
             if (!ParseFromCompressedData(
                     *res_buf_ptr, cntl->response(), res_cmp_type)) {
                 cntl->SetFailed(
@@ -669,6 +692,12 @@ void PackRpcRequest(butil::IOBuf* req_buf,
         request_meta->set_service_name(cntl->sampled_request()->meta.service_name());
         request_meta->set_method_name(cntl->sampled_request()->meta.method_name());
         meta.set_compress_type(cntl->sampled_request()->meta.compress_type());
+    } else if (cntl->is_baidu_generic_call()) {
+        request_meta->set_service_name(FLAGS_baidu_protocol_use_fullname ?
+                                       cntl->baidu_generic_call()->service_full_name :
+                                       cntl->baidu_generic_call()->name );
+        request_meta->set_method_name(cntl->baidu_generic_call()->name );
+        meta.set_compress_type(cntl->request_compress_type());
     } else {
         return cntl->SetFailed(ENOMETHOD, "%s.method is NULL", __FUNCTION__);
     }
@@ -715,6 +744,11 @@ void PackRpcRequest(butil::IOBuf* req_buf,
     if (attached_size) {
         req_buf->append(cntl->request_attachment());
     }
+}
+
+const std::string& GetRpcMethodName(const google::protobuf::MethodDescriptor* method,
+                                    const Controller* cntl) {
+    return cntl->is_baidu_generic_call() ? cntl->baidu_generic_call()->full_name : method->full_name();
 }
 
 }  // namespace policy

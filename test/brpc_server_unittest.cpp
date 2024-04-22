@@ -1620,4 +1620,23 @@ TEST_F(ServerTest, max_concurrency) {
     stub.Echo(&cntl4, &req, NULL, NULL);
     ASSERT_FALSE(cntl4.Failed()) << cntl4.ErrorText();
 }
+
+TEST_F(ServerTest, baidu_generic_call) {
+    const int port = 9200;
+    brpc::Server server;
+    EchoServiceImpl service;
+    ASSERT_EQ(0, server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE));
+    ASSERT_EQ(0, server.Start(port, NULL));
+
+    brpc::Channel normal_channel;
+    ASSERT_EQ(0, normal_channel.Init("0.0.0.0", port, NULL));
+    test::EchoService_Stub stub(&normal_channel);
+
+    brpc::Controller cntl;
+    test::EchoRequest req;
+    test::EchoResponse res;
+    req.set_message("hello");
+    stub.Echo(&cntl, &req, &res, NULL);
+}
+
 } //namespace

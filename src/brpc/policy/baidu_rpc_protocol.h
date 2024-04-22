@@ -46,6 +46,9 @@ void PackRpcRequest(butil::IOBuf* buf,
                     const butil::IOBuf& request,
                     const Authenticator* auth);
 
+const std::string& GetRpcMethodName(const google::protobuf::MethodDescriptor* method,
+                                    const Controller* cntl);
+
 }  // namespace policy
 } // namespace brpc
 
