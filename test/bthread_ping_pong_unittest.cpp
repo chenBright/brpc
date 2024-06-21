@@ -101,7 +101,7 @@ void* butex_player(void* void_arg) {
     PlayerArg* arg = static_cast<PlayerArg*>(void_arg);
     int counter = INITIAL_FUTEX_VALUE;
     while (!stop) {
-        int rc = bthread::butex_wait(arg->wait_addr, counter, NULL);
+        int rc = bthread::butex_wait(arg->wait_addr, counter);
         ++counter;
         ++*arg->wake_addr;
         bthread::butex_wake(arg->wake_addr);

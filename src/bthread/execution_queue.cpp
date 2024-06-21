@@ -263,7 +263,7 @@ int ExecutionQueueBase::join(uint64_t id) {
     int expected = _version_of_id(id);
     // acquire fence makes this thread see changes before changing _join_butex.
     while (expected == m->_join_butex->load(butil::memory_order_acquire)) {
-        if (butex_wait(m->_join_butex, expected, NULL) < 0 &&
+        if (butex_wait(m->_join_butex, expected) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
         }

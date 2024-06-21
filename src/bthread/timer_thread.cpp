@@ -19,6 +19,7 @@
 
 
 #include <queue>                           // heap functions
+#include <gflags/gflags.h>
 #include "butil/scoped_lock.h"
 #include "butil/logging.h"
 #include "butil/third_party/murmurhash3/murmurhash3.h"   // fmix64
@@ -30,6 +31,8 @@
 #include "bthread/log.h"
 
 namespace bthread {
+
+DEFINE_uint32(wake_interval_ms, 1000, "Interval to wake up TimerThread");
 
 // Defined in task_control.cpp
 void run_worker_startfn();
@@ -84,8 +87,7 @@ public:
     
     // Schedule a task into this bucket.
     // Returns the TaskId and if it has the nearest run time.
-    ScheduleResult schedule(void (*fn)(void*), void* arg,
-                            const timespec& abstime);
+    ScheduleResult schedule(void (*fn)(void*), void* arg, int64_t run_time_us);
 
     // Pull all scheduled tasks.
     // This function is called in timer thread.
@@ -183,8 +185,7 @@ TimerThread::Task* TimerThread::Bucket::consume_tasks() {
 }
 
 TimerThread::Bucket::ScheduleResult
-TimerThread::Bucket::schedule(void (*fn)(void*), void* arg,
-                              const timespec& abstime) {
+TimerThread::Bucket::schedule(void (*fn)(void*), void* arg, int64_t run_time_us) {
     butil::ResourceId<Task> slot_id;
     Task* task = butil::get_resource<Task>(&slot_id);
     if (task == NULL) {
@@ -194,7 +195,7 @@ TimerThread::Bucket::schedule(void (*fn)(void*), void* arg,
     task->next = NULL;
     task->fn = fn;
     task->arg = arg;
-    task->run_time = butil::timespec_to_microseconds(abstime);
+    task->run_time = run_time_us;
     uint32_t version = task->version.load(butil::memory_order_relaxed);
     if (version == 0) {  // skip 0.
         task->version.fetch_add(2, butil::memory_order_relaxed);
@@ -216,23 +217,23 @@ TimerThread::Bucket::schedule(void (*fn)(void*), void* arg,
     return result;
 }
 
-TimerThread::TaskId TimerThread::schedule(
-    void (*fn)(void*), void* arg, const timespec& abstime) {
+TimerThread::TaskId
+TimerThread::schedule(void (*fn)(void*), void* arg, int64_t timeout_us) {
     if (_stop.load(butil::memory_order_relaxed) || !_started) {
         // Not add tasks when TimerThread is about to stop.
         return INVALID_TASK_ID;
     }
+    const int64_t run_time_us = butil::cpuwide_time_us() + timeout_us;
     // Hashing by pthread id is better for cache locality.
-    const Bucket::ScheduleResult result = 
+    const Bucket::ScheduleResult result =
         _buckets[butil::fmix64(pthread_numeric_id()) % _options.num_buckets]
-        .schedule(fn, arg, abstime);
+            .schedule(fn, arg, run_time_us);
     if (result.earlier) {
         bool earlier = false;
-        const int64_t run_time = butil::timespec_to_microseconds(abstime);
         {
             BAIDU_SCOPED_LOCK(_mutex);
-            if (run_time < _nearest_run_time) {
-                _nearest_run_time = run_time;
+            if (run_time_us < _nearest_run_time) {
+                _nearest_run_time = run_time_us;
                 ++_nsignals;
                 earlier = true;
             }
@@ -242,6 +243,13 @@ TimerThread::TaskId TimerThread::schedule(
         }
     }
     return result.task_id;
+}
+
+TimerThread::TaskId TimerThread::schedule(void (*fn)(void*), void* arg,
+                                          const timespec& abstime) {
+    int64_t timeout_us =
+        butil::timespec_to_microseconds(abstime) - butil::gettimeofday_us();
+    return schedule(fn, arg, timeout_us);
 }
 
 // Notice that we don't recycle the Task in this function, let TimerThread::run
@@ -318,7 +326,7 @@ void TimerThread::run() {
     logging::ComlogInitializer comlog_initializer;
 #endif
 
-    int64_t last_sleep_time = butil::gettimeofday_us();
+    int64_t last_sleep_time = butil::cpuwide_time_us();
     BT_VLOG << "Started TimerThread=" << pthread_self();
 
     // min heap of tasks (ordered by run_time)
@@ -369,7 +377,7 @@ void TimerThread::run() {
         bool pull_again = false;
         while (!tasks.empty()) {
             Task* task1 = tasks[0];  // the about-to-run task
-            if (butil::gettimeofday_us() < task1->run_time) {  // not ready yet.
+            if (butil::cpuwide_time_us() < task1->run_time) {  // not ready yet.
                 break;
             }
             // Each time before we run the earliest task (that we think), 
@@ -409,7 +417,7 @@ void TimerThread::run() {
         // Similarly with the situation before running tasks, we check
         // _nearest_run_time to prevent us from waiting on a non-earliest
         // task. We also use the _nsignal to make sure that if new task 
-        // is earlier than the realtime that we wait for, we'll wake up.
+        // is earlier than the time that we wait for, we'll wake up.
         int expected_nsignals = 0;
         {
             BAIDU_SCOPED_LOCK(_mutex);
@@ -424,14 +432,19 @@ void TimerThread::run() {
         }
         timespec* ptimeout = NULL;
         timespec next_timeout = { 0, 0 };
-        const int64_t now = butil::gettimeofday_us();
+        const int64_t now = butil::cpuwide_time_us();
         if (next_run_time != std::numeric_limits<int64_t>::max()) {
+            int64_t timeout_us = next_run_time - now;
+            if (timeout_us <= 0) {
+                // Next task is already timeout.
+                continue;
+            }
             next_timeout = butil::microseconds_to_timespec(next_run_time - now);
             ptimeout = &next_timeout;
         }
         busy_seconds += (now - last_sleep_time) / 1000000.0;
         futex_wait_private(&_nsignals, expected_nsignals, ptimeout);
-        last_sleep_time = butil::gettimeofday_us();
+        last_sleep_time = butil::cpuwide_time_us();
     }
     BT_VLOG << "Ended TimerThread=" << pthread_self();
 }

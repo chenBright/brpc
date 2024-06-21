@@ -101,7 +101,7 @@ struct ButexBthreadWaiter : public ButexWaiter {
     int expected_value;
     Butex* initial_butex;
     TaskControl* control;
-    const timespec* abstime;
+    int64_t* timeout_us;
     bthread_tag_t tag;
 };
 
@@ -139,19 +139,21 @@ static void wakeup_pthread(ButexPthreadWaiter* pw) {
 
 bool erase_from_butex(ButexWaiter*, bool, WaiterState);
 
-int wait_pthread(ButexPthreadWaiter& pw, const timespec* abstime) {
+static int wait_pthread(ButexPthreadWaiter& pw, const int64_t* timeout_us_ptr) {
     timespec* ptimeout = NULL;
     timespec timeout;
-    int64_t timeout_us = 0;
+    bool timed = NULL != timeout_us_ptr;
+    int64_t remain_timeout_us = timed ? *timeout_us_ptr : 0;
+    int64_t end_us = timed ? butil::cpuwide_time_us() + remain_timeout_us : 0;
     int rc;
 
     while (true) {
-        if (abstime != NULL) {
-            timeout_us = butil::timespec_to_microseconds(*abstime) - butil::gettimeofday_us();
-            timeout = butil::microseconds_to_timespec(timeout_us);
+        if (timed) {
+            remain_timeout_us = end_us - butil::cpuwide_time_us();
+            timeout = butil::microseconds_to_timespec(remain_timeout_us);
             ptimeout = &timeout;
         }
-        if (timeout_us > MIN_SLEEP_US || abstime == NULL) {
+        if (remain_timeout_us > MIN_SLEEP_US || !timed) {
             rc = futex_wait_private(&pw.sig, PTHREAD_NOT_SIGNALLED, ptimeout);
             if (PTHREAD_NOT_SIGNALLED != pw.sig.load(butil::memory_order_acquire)) {
                 // If `sig' is changed, wakeup_pthread() must be called and `pw'
@@ -171,8 +173,8 @@ int wait_pthread(ButexPthreadWaiter& pw, const timespec* abstime) {
                 // Another thread is erasing `pw' as well, wait for the signal.
                 // Acquire fence makes this thread sees changes before wakeup.
                 if (pw.sig.load(butil::memory_order_acquire) == PTHREAD_NOT_SIGNALLED) {
-                    // already timedout, abstime and ptimeout are expired.
-                    abstime = NULL;
+                    // already timedout, ptimeout are expired.
+                    timed = false;
                     ptimeout = NULL;
                     continue;
                 }
@@ -562,9 +564,9 @@ static void wait_for_butex(void* arg) {
                    !bw->task_meta->interrupted) {
             b->waiters.Append(bw);
             bw->container.store(b, butil::memory_order_relaxed);
-            if (bw->abstime != NULL) {
+            if (NULL != bw->timeout_us && *bw->timeout_us > 0) {
                 bw->sleep_id = get_global_timer_thread()->schedule(
-                    erase_from_butex_and_wakeup, bw, *bw->abstime);
+                    erase_from_butex_and_wakeup, bw, *bw->timeout_us);
                 if (!bw->sleep_id) {  // TimerThread stopped.
                     errno = ESTOP;
                     erase_from_butex_and_wakeup(bw);
@@ -592,8 +594,9 @@ static void wait_for_butex(void* arg) {
     // TaskGroup::sched_to(&g, bw->tid, false/*2*/);
 }
 
-static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
-                                   const timespec* abstime) {
+static int butex_wait_from_pthread(TaskGroup* g, Butex* b,
+                                   int expected_value,
+                                   int64_t* timeout_us) {
     TaskMeta* task = NULL;
     ButexPthreadWaiter pw;
     pw.tid = 0;
@@ -624,7 +627,7 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
         bvar::Adder<int64_t>& num_waiters = butex_waiter_count();
         num_waiters << 1;
 #endif
-        rc = wait_pthread(pw, abstime);
+        rc = wait_pthread(pw, timeout_us);
 #ifdef SHOW_BTHREAD_BUTEX_WAITER_COUNT_IN_VARS
         num_waiters << -1;
 #endif
@@ -647,6 +650,16 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
 }
 
 int butex_wait(void* arg, int expected_value, const timespec* abstime) {
+    if (NULL == abstime) {
+        return butex_wait(arg, expected_value);
+    }
+
+    int64_t timeout_us =
+        butil::timespec_to_microseconds(*abstime) - butil::gettimeofday_us();
+    return butex_wait(arg, expected_value, &timeout_us);
+}
+
+int butex_wait(void* arg, int expected_value, int64_t* timeout_us) {
     Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
     if (b->value.load(butil::memory_order_relaxed) != expected_value) {
         errno = EWOULDBLOCK;
@@ -657,7 +670,7 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     }
     TaskGroup* g = tls_task_group;
     if (NULL == g || g->is_current_pthread_task()) {
-        return butex_wait_from_pthread(g, b, expected_value, abstime);
+        return butex_wait_from_pthread(g, b, expected_value, timeout_us);
     }
     ButexBthreadWaiter bbw;
     // tid is 0 iff the thread is non-bthread
@@ -669,19 +682,17 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     bbw.expected_value = expected_value;
     bbw.initial_butex = b;
     bbw.control = g->control();
-    bbw.abstime = abstime;
+    bbw.timeout_us = timeout_us;
     bbw.tag = g->tag();
 
-    if (abstime != NULL) {
+    if (NULL != timeout_us && *timeout_us < MIN_SLEEP_US) {
         // Schedule timer before queueing. If the timer is triggered before
         // queueing, cancel queueing. This is a kind of optimistic locking.
-        if (butil::timespec_to_microseconds(*abstime) <
-            (butil::gettimeofday_us() + MIN_SLEEP_US)) {
-            // Already timed out.
-            errno = ETIMEDOUT;
-            return -1;
-        }
+        // Already timed out.
+        errno = ETIMEDOUT;
+        return -1;
     }
+
 #ifdef SHOW_BTHREAD_BUTEX_WAITER_COUNT_IN_VARS
     bvar::Adder<int64_t>& num_waiters = butex_waiter_count();
     num_waiters << 1;
@@ -696,13 +707,13 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     // erase_from_butex_and_wakeup (called by TimerThread) is possibly still
     // running and using bbw. The chance is small, just spin until it's done.
     BT_LOOP_WHEN(unsleep_if_necessary(&bbw, get_global_timer_thread()) < 0,
-                 30/*nops before sched_yield*/);
-    
+        30/*nops before sched_yield*/);
+
     // If current_waiter is NULL, TaskGroup::interrupt() is running and using bbw.
     // Spin until current_waiter != NULL.
     BT_LOOP_WHEN(bbw.task_meta->current_waiter.exchange(
-                     NULL, butil::memory_order_acquire) == NULL,
-                 30/*nops before sched_yield*/);
+        NULL, butil::memory_order_acquire) == NULL,
+        30/*nops before sched_yield*/);
 #ifdef SHOW_BTHREAD_BUTEX_WAITER_COUNT_IN_VARS
     num_waiters << -1;
 #endif

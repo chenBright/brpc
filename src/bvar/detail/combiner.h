@@ -245,6 +245,23 @@ friend class GlobalValue<self_type>;
         return ret;
     }
 
+    // [Threadsafe] May be called from anywhere
+    template<typename Callback>
+    void combine_agents_with_callback(bool reset_tls, Callback&& callback) {
+        ElementTp tls_value;
+        butil::AutoLock guard(_lock);
+        for (butil::LinkNode<Agent>* node = _agents.head();
+             node != _agents.end(); node = node->next()) {
+            if (reset_tls) {
+                node->value()->element.exchange(&tls_value, _element_identity);
+            } else {
+                node->value()->element.load(&tls_value);
+            }
+            call_op_returning_void(_op, _global_result, tls_value);
+        }
+        callback(_global_result);
+    }
+
     typename butil::add_cr_non_integral<ElementTp>::type element_identity() const 
     { return _element_identity; }
     typename butil::add_cr_non_integral<ResultTp>::type result_identity() const 
@@ -339,6 +356,56 @@ private:
     ElementTp                                   _element_identity;
     butil::LinkedList<Agent>                     _agents;
 };
+
+// todo 不要放在detail文件夹，放到独立的文件？
+template <typename Result, typename Element>
+class Statistician {
+    // Local submit operator used in operator<<
+    struct LocalSubmitOp {
+        void operator()(Result& r, const Element& e) const {
+            r.Submit(e);
+        }
+    };
+
+    // Combine two Result into one.
+    struct CombineOp {
+        void operator()(Result& r1, Result r2) const {
+            if (&r1 == &r2) {
+                return;
+            }
+            r1.Merge(r2);
+        }
+    };
+
+    typedef bvar::detail::AgentCombiner<Result, Result, CombineOp> Combiner;
+    typedef typename Combiner::Agent Agent;
+
+public:
+    Statistician& operator<<(const Element& item) {
+        // It's wait-free for most time
+        Agent* agent = _combiner.get_or_create_tls_agent();
+        if (__builtin_expect(!agent, 0)) {
+            LOG(FATAL) << "Fail to create agent";
+            return *this;
+        }
+        agent->element.modify(_local_op, item);
+        return *this;
+    }
+
+    Result get_stat() {
+        return _combiner.reset_all_agents();
+    }
+
+    template<typename Callback>
+    void get_stat_with_callback(Callback&& callback) {
+        _combiner.combine_agents_with_callback(true, callback);
+    }
+
+private:
+    Combiner _combiner;
+    LocalSubmitOp _local_op;
+};
+
 
 }  // namespace detail
 }  // namespace bvar

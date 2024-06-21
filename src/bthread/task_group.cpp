@@ -500,7 +500,7 @@ int TaskGroup::join(bthread_t tid, void** return_value) {
     }
     const uint32_t expected_version = get_version(tid);
     while (*m->version_butex == expected_version) {
-        if (butex_wait(m->version_butex, expected_version, NULL) < 0 &&
+        if (butex_wait(m->version_butex, expected_version) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
         }
@@ -768,8 +768,7 @@ void TaskGroup::_add_sleep_event(void* void_args) {
 
     TimerThread::TaskId sleep_id;
     sleep_id = get_global_timer_thread()->schedule(
-        ready_to_run_from_timer_thread, void_args,
-        butil::microseconds_from_now(e.timeout_us));
+        ready_to_run_from_timer_thread, void_args, e.timeout_us);
 
     if (!sleep_id) {
         e.meta->sleep_failed = true;

@@ -69,7 +69,12 @@ public:
     // Stop the timer thread. Later schedule() will return INVALID_TASK_ID.
     void stop_and_join();
 
-    // Schedule |fn(arg)| to run at realtime |abstime| approximately.
+    // Schedule |fn(arg)| to run after timeout_us(monotonic time) approximately.
+    // Returns: identifier of the scheduled task, INVALID_TASK_ID on error.
+    TaskId schedule(void (*fn)(void*), void* arg, int64_t timeout_us);
+
+    // Schedule |fn(arg)| to run at realtime |abstime| approximately,
+    // which will be converted to monotonic time.
     // Returns: identifier of the scheduled task, INVALID_TASK_ID on error.
     TaskId schedule(void (*fn)(void*), void* arg, const timespec& abstime);
 

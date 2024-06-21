@@ -43,11 +43,14 @@ extern void bthread_flush();
 // worker pthreads are not notified.
 extern int bthread_about_to_quit();
 
+extern int bthread_timer_after(bthread_timer_t* id, int64_t timeout_us,
+                               void (*on_timer)(void*), void* arg);
 // Run `on_timer(arg)' at or after real-time `abstime'. Put identifier of the
 // timer into *id.
 // Return 0 on success, errno otherwise.
 extern int bthread_timer_add(bthread_timer_t* id, struct timespec abstime,
-                             void (*on_timer)(void*), void* arg);
+void (*on_timer)(void*), void* arg);
+
 
 // Unschedule the timer associated with `id'.
 // Returns: 0 - exist & not-run; 1 - still running; EINVAL - not exist.

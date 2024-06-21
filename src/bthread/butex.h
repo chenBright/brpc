@@ -69,6 +69,8 @@ int butex_requeue(void* butex1, void* butex2);
 //   Different from FUTEX_WAIT, butex_wait uses absolute time.
 // Returns 0 on success, -1 otherwise and errno is set.
 int butex_wait(void* butex, int expected_value, const timespec* abstime);
+// todo 兼容性
+int butex_wait(void* butex, int expected_value, int64_t* timeout_us = NULL);
 
 }  // namespace bthread
 

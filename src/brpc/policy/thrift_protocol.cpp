@@ -19,9 +19,11 @@
 #include <google/protobuf/descriptor.h>         // MethodDescriptor
 #include <google/protobuf/message.h>            // Message
 #include <gflags/gflags.h>
+#include <regex>
 
 #include "butil/time.h" 
 #include "butil/iobuf.h"                        // butil::IOBuf
+#include "butil/strings/string_number_conversions.h"
 #include "brpc/log.h"
 #include "brpc/controller.h"                    // Controller
 #include "brpc/socket.h"                        // Socket
@@ -188,6 +190,27 @@ void ReadThriftException(const butil::IOBuf& body,
     iprot.getTransport()->readEnd();
 }
 
+::apache::thrift::TApplicationException::TApplicationExceptionType ErrorCode2AppExceptionType(int error_code) {
+    switch (error_code) {
+    case EINTERNAL:
+    case ELIMIT:
+    case ELOGOFF:
+        return ::apache::thrift::TApplicationException::INTERNAL_ERROR;
+    default:
+        return ::apache::thrift::TApplicationException::UNKNOWN;
+    }
+}
+
+bool ParseErrorCodeFromErrorText(const std::string& error_text, int* error_code) {
+    if (error_text.empty()) {
+        return false;
+    }
+    std::regex pattern(R"(\[E(\d+)\])");
+    std::smatch matches;
+    return std::regex_search(error_text, matches, pattern) &&
+           matches.size() == 1 &&
+           butil::StringToInt(matches[1].str(), error_code);
+
 // The continuation of request processing. Namely send response back to client.
 class ThriftClosure : public google::protobuf::Closure {
 public:
@@ -291,7 +314,9 @@ void ThriftClosure::DoRun() {
         auto out_buffer =
             THRIFT_STDCXX::make_shared<apache::thrift::transport::TMemoryBuffer>();
         apache::thrift::protocol::TBinaryProtocolT<apache::thrift::transport::TMemoryBuffer> oprot(out_buffer);
-        ::apache::thrift::TApplicationException x(_controller.ErrorText());
+        ::apache::thrift::TApplicationException::TApplicationExceptionType type =
+            ErrorCode2AppExceptionType(_controller.ErrorCode());
+        ::apache::thrift::TApplicationException x(type, _controller.ErrorText());
         oprot.writeMessageBegin(
             method_name, ::apache::thrift::protocol::T_EXCEPTION, seq_id);
         x.write(&oprot);
@@ -608,7 +633,11 @@ void ProcessThriftResponse(InputMessageBase* msg_base) {
             ::apache::thrift::TApplicationException x;
             ReadThriftException(msg->payload, &x);
             // TODO: Convert exception type to brpc errors.
-            cntl->SetFailed(x.what());
+            int error_code = -1;
+            if (x.getType() == ::apache::thrift::TApplicationException::INTERNAL_ERROR) {
+                ParseErrorCodeFromErrorText(x.what(), &error_code);
+            }
+            cntl->SetFailed(error_code, x.what().c_str());
             break;
         }
         if (mtype != ::apache::thrift::protocol::T_REPLY) {

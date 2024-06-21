@@ -50,7 +50,7 @@ int bthread_once_impl(bthread_once_t* once_control, void (*init_routine)()) {
         // (b)threads that want to use the initialized data.
         butex->store(bthread_once_t::INITIALIZED, butil::memory_order_release);
         // Wake up all other (b)threads.
-        bthread::butex_wake_all(butex);
+        butex_wake_all(butex);
         return 0;
     }
 
@@ -63,7 +63,7 @@ int bthread_once_impl(bthread_once_t* once_control, void (*init_routine)()) {
         }
         // Unless your constructor can be very time consuming, it is very unlikely o hit
         // this race. When it does, we just wait the thread until the object has been created.
-        if (bthread::butex_wait(butex, val, NULL) < 0 &&
+        if (butex_wait(butex, val) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR/*note*/) {
             return errno;
         }

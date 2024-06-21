@@ -254,4 +254,11 @@ TEST(TimerThreadTest, schedule_and_unschedule_in_task) {
     keeper5.expect_first_run();
 }
 
+TEST(TimerThreadTest, test) {
+    bthread::TimerThread timer_thread;
+    ASSERT_EQ(0, timer_thread.start(NULL));
+
+    sleep(10);
+}
+
 } // end namespace

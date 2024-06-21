@@ -393,8 +393,7 @@ int TaskControl::_destroy_group(TaskGroup* g) {
     // FLAGS_task_group_delete_delay seconds
     if (erased) {
         get_global_timer_thread()->schedule(
-            delete_task_group, g,
-            butil::microseconds_from_now(FLAGS_task_group_delete_delay * 1000000L));
+            delete_task_group, g, FLAGS_task_group_delete_delay * 1000000L);
     }
     return 0;
 }

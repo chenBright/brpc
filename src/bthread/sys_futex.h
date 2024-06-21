@@ -37,6 +37,7 @@ namespace bthread {
 
 inline int futex_wait_private(
     void* addr1, int expected, const timespec* timeout) {
+    // The timeout is by default measured according to the CLOCK_MONOTONIC clock.
     return syscall(SYS_futex, addr1, (FUTEX_WAIT | FUTEX_PRIVATE_FLAG),
                    expected, timeout, NULL, 0);
 }

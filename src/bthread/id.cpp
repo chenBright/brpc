@@ -440,7 +440,7 @@ int bthread_id_lock_and_reset_range_verbose(
             uint32_t expected_ver = *butex;
             meta->mutex.unlock();
             ever_contended = true;
-            if (bthread::butex_wait(butex, expected_ver, NULL) < 0 &&
+            if (bthread::butex_wait(butex, expected_ver) < 0 &&
                 errno != EWOULDBLOCK && errno != EINTR) {
                 return errno;
             }
@@ -527,7 +527,7 @@ int bthread_id_join(bthread_id_t id) {
         if (!has_ver) {
             break;
         }
-        if (bthread::butex_wait(join_butex, expected_ver, NULL) < 0 &&
+        if (bthread::butex_wait(join_butex, expected_ver) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
         }

@@ -72,7 +72,7 @@ static void *odd_thread(void *) {
             npthreads.fetch_add(1);
         }
         bthread::butex_wake_all(even);
-        bthread::butex_wait(odd, 0, NULL);
+        bthread::butex_wait(odd, 0);
     }
     return NULL;
 }
@@ -85,7 +85,7 @@ static void *even_thread(void *) {
             npthreads.fetch_add(1);
         }
         bthread::butex_wake_all(odd);
-        bthread::butex_wait(even, 0, NULL);
+        bthread::butex_wait(even, 0);
     }
     return NULL;
 }

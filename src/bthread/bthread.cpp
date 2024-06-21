@@ -422,7 +422,7 @@ int bthread_about_to_quit() {
     return EPERM;
 }
 
-int bthread_timer_add(bthread_timer_t* id, timespec abstime,
+int bthread_timer_after(bthread_timer_t* id, int64_t timeout_us,
                       void (*on_timer)(void*), void* arg) {
     bthread::TaskControl* c = bthread::get_or_new_task_control();
     if (c == NULL) {
@@ -432,12 +432,19 @@ int bthread_timer_add(bthread_timer_t* id, timespec abstime,
     if (tt == NULL) {
         return ENOMEM;
     }
-    bthread_timer_t tmp = tt->schedule(on_timer, arg, abstime);
+    bthread_timer_t tmp = tt->schedule(on_timer, arg, timeout_us);
     if (tmp != 0) {
         *id = tmp;
         return 0;
     }
     return ESTOP;
+}
+
+int bthread_timer_add(bthread_timer_t* id, timespec abstime,
+                      void (*on_timer)(void*), void* arg) {
+    int64_t timeout_us =
+        butil::timespec_to_microseconds(abstime) - butil::gettimeofday_us();
+    return bthread_timer_after(id, timeout_us, on_timer, arg);
 }
 
 int bthread_timer_del(bthread_timer_t id) {

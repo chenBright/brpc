@@ -97,7 +97,7 @@ int bthread_cond_wait(bthread_cond_t* __restrict c,
     }
     bthread_mutex_unlock(m);
     int rc1 = 0;
-    if (bthread::butex_wait(ic->seq, expected_seq, NULL) < 0 &&
+    if (bthread::butex_wait(ic->seq, expected_seq) < 0 &&
         errno != EWOULDBLOCK && errno != EINTR/*note*/) {
         // EINTR should not be returned by cond_*wait according to docs on
         // pthread, however spurious wake-up is OK, just as we do here
