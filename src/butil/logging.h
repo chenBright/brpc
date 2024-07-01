@@ -302,16 +302,16 @@ BUTIL_EXPORT void SetLogAssertHandler(LogAssertHandler handler);
 
 class LogSink {
 public:
-    LogSink() {}
-    virtual ~LogSink() {}
+    LogSink() = default;
+    virtual ~LogSink() = default;
     // Called when a log is ready to be written out.
     // Returns true to stop further processing.
     virtual bool OnLogMessage(int severity, const char* file, int line,
                               const butil::StringPiece& log_content) = 0;
     virtual bool OnLogMessage(int severity, const char* file,
-                              int line, const char* func,
+                              int line, const char* /*func*/,
                               const butil::StringPiece& log_content) {
-        return true;
+        return OnLogMessage(severity, file, line, log_content);
     }
 private:
     DISALLOW_COPY_AND_ASSIGN(LogSink);
@@ -879,12 +879,18 @@ BUTIL_EXPORT SystemErrorCode GetLastSystemErrorCode();
 BUTIL_EXPORT void SetLastSystemErrorCode(SystemErrorCode err);
 BUTIL_EXPORT std::string SystemErrorCodeToString(SystemErrorCode error_code);
 
+struct LogEntry {
+    char data[1024];
+    size_t size{0};
+    LogEntry* next{NULL};
+};
+
 // Underlying buffer to store logs. Comparing to using std::ostringstream
 // directly, this utility exposes more low-level methods so that we avoid
 // creation of std::string which allocates memory internally.
 class CharArrayStreamBuf : public std::streambuf {
 public:
-    explicit CharArrayStreamBuf() : _data(NULL), _size(0) {}
+    explicit CharArrayStreamBuf() : _data(NULL), _size(0), _entry(NULL) {}
     ~CharArrayStreamBuf() override;
 
     int overflow(int ch) override;
@@ -894,6 +900,8 @@ public:
 private:
     char* _data;
     size_t _size;
+    LogEntry* _current_entry;
+    LogEntry* _entry;
 };
 
 // A std::ostream to << objects.

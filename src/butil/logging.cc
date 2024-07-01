@@ -147,7 +147,7 @@ DEFINE_bool(log_hostname, false, "Add host after pid in each log so"
 
 DEFINE_bool(log_year, false, "Log year in datetime part in each log");
 
-DEFINE_bool(log_func_name, false, "Log function name in each log");
+DEFINE_bool(log_func_name, false, "[Deprecated] Log function name in each log");
 
 DEFINE_bool(async_log, false, "Use async log");
 
@@ -159,6 +159,8 @@ DEFINE_int32(max_async_log_queue_size, 100000, "Max async log size. "
 
 DEFINE_int32(sleep_to_flush_async_log_s, 0,
              "If the value > 0, sleep before atexit to flush async log");
+
+DEFINE_uint32(min_flush_size, 1024 * 64, "Minimum size to flush.");
 
 namespace {
 
@@ -179,6 +181,8 @@ PathString* log_file_name = NULL;
 
 // this file is lazily opened and the handle may be NULL
 FileHandle log_file = NULL;
+
+size_t unfflushed_size = 0;
 
 // Should we pop up fatal debug messages in a dialog?
 bool show_error_dialogs = false;
@@ -415,7 +419,17 @@ void CloseLogFileUnlocked() {
     log_file = NULL;
 }
 
-void Log2File(const std::string& log) {
+void Log2File(const std::string& log, bool immediate_flush) {
+#if defined(OS_WIN)
+    if (log.empty()) {
+        return;
+    }
+#else
+    if (log.empty() && !immediate_flush) {
+        return;
+    }
+#endif
+
     // We can have multiple threads and/or processes, so try to prevent them
     // from clobbering each other's writes.
     // If the client app did not call InitLogging, and the lock has not
@@ -432,8 +446,14 @@ void Log2File(const std::string& log) {
         WriteFile(log_file, static_cast<const void*>(log.data()),
                   static_cast<DWORD>(log.size()), &num_written, NULL);
 #else
-        fwrite(log.data(), log.size(), 1, log_file);
-        fflush(log_file);
+        if (!log.empty()) {
+            fwrite(log.data(), log.size(), 1, log_file);
+            unfflushed_size += log.size();
+        }
+        if (immediate_flush || unfflushed_size >= FLAGS_min_flush_size) {
+            fflush(log_file);
+            unfflushed_size = 0;
+        }
 #endif
     }
 }
@@ -458,7 +478,7 @@ TimeVal GetTimestamp() {
 #endif
 }
 
-struct BAIDU_CACHELINE_ALIGNMENT LogInfo {
+struct LogInfo {
     std::string file;
     std::string func;
     std::string content;
@@ -510,8 +530,8 @@ friend struct DefaultSingletonTraits<AsyncLogger>;
 
     bool IsLogComplete(LogRequest* old_head);
 
-    void DoLog(LogRequest* req);
-    void DoLog(const LogInfo& log_info);
+    void DoLog(LogRequest* req, bool immediate_flush);
+    void DoLog(const LogInfo& log_info, bool immediate_flush);
 
     butil::atomic<LogRequest*> _log_head;
     butil::Mutex _mutex;
@@ -570,14 +590,14 @@ void AsyncLogger::Log(const LogInfo& log_info) {
         FLAGS_max_async_log_queue_size;
     if (is_full || _stop.load(butil::memory_order_relaxed)) {
         // Async logger is full or stopped, fallback to sync log.
-        DoLog(log_info);
+        DoLog(log_info, true);
         return;
     }
 
     auto log_req = butil::get_object<LogRequest>();
     if (!log_req) {
         // Async log failed, fallback to sync log.
-        DoLog(log_info);
+        DoLog(log_info, true);
         return;
     }
     log_req->log_info = log_info;
@@ -594,14 +614,14 @@ void AsyncLogger::Log(LogInfo&& log_info) {
         FLAGS_max_async_log_queue_size;
     if (is_full || _stop.load(butil::memory_order_relaxed)) {
         // Async logger is full or stopped, fallback to sync log.
-        DoLog(log_info);
+        DoLog(log_info, true);
         return;
     }
 
     auto log_req = butil::get_object<LogRequest>();
     if (!log_req) {
         // Async log failed, fallback to sync log.
-        DoLog(log_info);
+        DoLog(log_info, true);
         return;
     }
     log_req->log_info = std::move(log_info);
@@ -628,7 +648,7 @@ void AsyncLogger::LogImpl(LogRequest* log_req) {
     if (!FLAGS_async_log_in_background_always) {
         // Use sync log for the LogRequest
         // which has got the right to write.
-        DoLog(log_req);
+        DoLog(log_req, true);
         // Return when there's no more LogRequests.
         if (IsLogComplete(log_req)) {
             butil::return_object(log_req);
@@ -688,18 +708,21 @@ void AsyncLogger::LogTask(LogRequest* req) {
             LogRequest* const saved_req = req;
             req = req->next;
             if (!saved_req->log_info.content.empty()) {
-                DoLog(saved_req);
+                DoLog(saved_req, false);
             }
             // Release LogRequests until last request.
             butil::return_object(saved_req);
         }
         if (!req->log_info.content.empty()) {
-            DoLog(req);
+            DoLog(req, false);
         }
 
         // Return when there's no more LogRequests.
         if (IsLogComplete(req)) {
             butil::return_object(req);
+            // Force fflush.
+            LogInfo log_info;
+            DoLog(log_info, true);
             return;
         }
     } while (true);
@@ -744,16 +767,16 @@ bool AsyncLogger::IsLogComplete(LogRequest* old_head) {
     return false;
 }
 
-void AsyncLogger::DoLog(LogRequest* req) {
-    DoLog(req->log_info);
+void AsyncLogger::DoLog(LogRequest* req, bool immediate_flush) {
+    DoLog(req->log_info, immediate_flush);
     req->log_info.content.clear();
 }
 
-void AsyncLogger::DoLog(const LogInfo& log_info) {
+void AsyncLogger::DoLog(const LogInfo& log_info, bool immediate_flush) {
     if (log_info.raw) {
-        Log2File(LogInfo2LogStr(log_info));
+        Log2File(LogInfo2LogStr(log_info), immediate_flush);
     } else {
-        Log2File(log_info.content);
+        Log2File(log_info.content, immediate_flush);
     }
     _log_request_count.fetch_sub(1, butil::memory_order_relaxed);
 }
@@ -1114,6 +1137,15 @@ CharArrayStreamBuf::~CharArrayStreamBuf() {
 }
 
 int CharArrayStreamBuf::overflow(int ch) {
+    sync();
+
+    auto entry = new LogEntry;
+    _current_entry->next = entry;
+    _current_entry = entry;
+    setp(_current_entry->data, _current_entry->data + arraysize(_current_entry->data));
+    return sputc(ch);
+
+
     if (ch == std::streambuf::traits_type::eof()) {
         return ch;
     }
@@ -1135,6 +1167,11 @@ int CharArrayStreamBuf::overflow(int ch) {
 }
 
 int CharArrayStreamBuf::sync() {
+    auto ptr = pptr();
+    if (ptr > _current_entry->data) {
+        _current_entry->size += static_cast<uintptr_t>(ptr - _current_entry->data);
+    }
+
     // data are already there.
     return 0;
 }
@@ -1301,7 +1338,7 @@ public:
                 if (log.empty()) {
                     log = LogInfoToLogStr(severity, file, line, func, content);
                 }
-                Log2File(log);
+                Log2File(log, true);
             } else {
                 LogInfo info;
                 if (log.empty()) {
@@ -1369,15 +1406,7 @@ void LogStream::FlushWithoutReset() {
         DoublyBufferedLogSink::ScopedPtr ptr;
         if (DoublyBufferedLogSink::GetInstance()->Read(&ptr) == 0 &&
             (*ptr) != NULL) {
-            bool result = false;
-            if (FLAGS_log_func_name) {
-                result = (*ptr)->OnLogMessage(_severity, _file, _line,
-                                              _func, content());
-            } else {
-                result = (*ptr)->OnLogMessage(_severity, _file,
-                                              _line, content());
-            }
-            if (result) {
+            if ((*ptr)->OnLogMessage(_severity, _file, _line, _func, content())) {
                 goto FINISH_LOGGING;
             }
 #ifdef BAIDU_INTERNAL
@@ -1396,13 +1425,8 @@ void LogStream::FlushWithoutReset() {
     }
 #endif
     if (!tried_default) {
-        if (FLAGS_log_func_name) {
-            DefaultLogSink::GetInstance()->OnLogMessage(
-                _severity, _file, _line, _func, content());
-        } else {
-            DefaultLogSink::GetInstance()->OnLogMessage(
-                _severity, _file, _line, content());
-        }
+        DefaultLogSink::GetInstance()->OnLogMessage(
+            _severity, _file, _line, _func, content());
     }
 
 FINISH_LOGGING:
