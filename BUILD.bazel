@@ -130,6 +130,8 @@ BUTIL_SRCS = [
     "src/butil/debug/proc_maps_linux.cc",
     "src/butil/debug/stack_trace.cc",
     "src/butil/debug/stack_trace_posix.cc",
+    "src/butil/debug/leak_annotations.cc",
+    "src/butil/debug/address_annotations.cc",
     "src/butil/environment.cc",
     "src/butil/files/file.cc",
     "src/butil/files/file_posix.cc",

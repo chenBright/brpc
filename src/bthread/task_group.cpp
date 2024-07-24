@@ -28,6 +28,7 @@
 #include "butil/fast_rand.h"
 #include "butil/unique_ptr.h"
 #include "butil/third_party/murmurhash3/murmurhash3.h" // fmix64
+#include "butil/debug/address_annotations.h"
 #include "bthread/errno.h"                  // ESTOP
 #include "bthread/butex.h"                  // butex_*
 #include "bthread/sys_futex.h"              // futex_wake_private
@@ -163,7 +164,7 @@ void TaskGroup::run_main_task() {
         DCHECK_EQ(this, dummy);
         DCHECK_EQ(_cur_meta->stack, _main_stack);
         if (_cur_meta->tid != _main_tid) {
-            TaskGroup::task_runner(1/*skip remained*/);
+            TaskGroup::pthread_task_runner();
         }
         if (FLAGS_show_per_worker_usage_in_vars && !usage_bvar) {
             char name[32];
@@ -183,8 +184,7 @@ void TaskGroup::run_main_task() {
 }
 
 TaskGroup::TaskGroup(TaskControl* c)
-    :
-    _cur_meta(NULL)
+    : _cur_meta(NULL)
     , _control(c)
     , _num_nosignal(0)
     , _nsignaled(0)
@@ -212,10 +212,33 @@ TaskGroup::~TaskGroup() {
     if (_main_tid) {
         TaskMeta* m = address_meta(_main_tid);
         CHECK(_main_stack == m->stack);
+        _main_stack->storage.bottom = NULL;
+        _main_stack->storage.stacksize = 0;
         return_stack(m->release_stack());
         return_resource(get_slot(_main_tid));
         _main_tid = 0;
     }
+}
+
+int PthreadAttrGetStack(void*& stack_addr, size_t& stack_size) {
+#if defined(OS_MACOSX)
+    stack_addr = pthread_get_stackaddr_np(pthread_self());
+    stack_size = pthread_get_stacksize_np(pthread_self());
+    return 0;
+#else
+    pthread_attr_t attr;
+    int rc = pthread_getattr_np(pthread_self(), &attr);
+    if (0 != rc) {
+        LOG(ERROR) << "Fail to get pthread attributes: " << berror(rc);
+        return rc;
+    }
+    rc = pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+    if (0 != rc) {
+        LOG(ERROR) << "Fail to get pthread stack: " << berror(rc);
+    }
+    pthread_attr_destroy(&attr);
+    return rc;
+#endif
 }
 
 int TaskGroup::init(size_t runqueue_capacity) {
@@ -227,6 +250,12 @@ int TaskGroup::init(size_t runqueue_capacity) {
         LOG(FATAL) << "Fail to init _remote_rq";
         return -1;
     }
+    void* stack_addr = NULL;
+    size_t stack_size = 0;
+    if (0 != PthreadAttrGetStack(stack_addr, stack_size)) {
+        return -1;
+    }
+
     ContextualStack* stk = get_stack(STACK_TYPE_MAIN, NULL);
     if (NULL == stk) {
         LOG(FATAL) << "Fail to get main stack container";
@@ -251,11 +280,22 @@ int TaskGroup::init(size_t runqueue_capacity) {
     m->tid = make_tid(*m->version_butex, slot);
     m->set_stack(stk);
 
+    stk->storage.bottom = stack_addr;
+    stk->storage.stacksize = stack_size;
+    // No guard size required for ASan.
+
     _cur_meta = m;
     _main_tid = m->tid;
     _main_stack = stk;
     _last_run_ns = butil::cpuwide_time_ns();
     return 0;
+}
+
+void TaskGroup::bthread_task_runner(intptr_t) {
+    // This is a new thread and it doesn't have the fake stack yet. ASan will
+    // create it lazily, for now just pass nullptr.
+    butil::debug::ASanFinishSwitchFiber(NULL, NULL, NULL);
+    task_runner(0);
 }
 
 void TaskGroup::task_runner(intptr_t skip_remained) {
@@ -546,12 +586,13 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
     TaskMeta* const cur_meta = g->_cur_meta;
     TaskMeta* next_meta = address_meta(next_tid);
     if (next_meta->stack == NULL) {
+        // Reuse the stack of the current ending task.
         if (next_meta->stack_type() == cur_meta->stack_type()) {
             // also works with pthread_task scheduling to pthread_task, the
             // transfered stack is just _main_stack.
             next_meta->set_stack(cur_meta->release_stack());
         } else {
-            ContextualStack* stk = get_stack(next_meta->stack_type(), task_runner);
+            ContextualStack* stk = get_stack(next_meta->stack_type(), bthread_task_runner);
             if (stk) {
                 next_meta->set_stack(stk);
             } else {
@@ -564,7 +605,7 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
             }
         }
     }
-    sched_to(pg, next_meta);
+    sched_to(pg, next_meta, true);
 }
 
 void TaskGroup::sched(TaskGroup** pg) {
@@ -585,7 +626,7 @@ void TaskGroup::sched(TaskGroup** pg) {
 
 extern void CheckBthreadScheSafety();
 
-void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
+void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta, bool cur_ending) {
     TaskGroup* g = *pg;
 #ifndef NDEBUG
     if ((++g->_sched_recursive_guard) > 1) {
@@ -625,7 +666,11 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
         if (cur_meta->stack != NULL) {
             if (next_meta->stack != cur_meta->stack) {
                 CheckBthreadScheSafety();
-                jump_stack(cur_meta->stack, next_meta->stack);
+                {
+                    ANNOTATE_SCOPED_ASAN_FIBER_SWITCHER(
+                        cur_meta->stack->storage, cur_ending);
+                    jump_stack(cur_meta->stack, next_meta->stack);
+                }
                 // probably went to another group, need to assign g again.
                 g = BAIDU_GET_VOLATILE_THREAD_LOCAL(tls_task_group);
             }

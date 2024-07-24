@@ -89,7 +89,8 @@ void* TaskControl::worker_thread(void* arg) {
         return NULL;
     }
     std::string worker_thread_name = butil::string_printf(
-        "brpc_wkr:%d-%d", g->tag(), c->_next_worker_id.fetch_add(1, butil::memory_order_relaxed));
+        "brpc_wkr:%d-%d", g->tag(),
+        c->_next_worker_id.fetch_add(1, butil::memory_order_relaxed));
     butil::PlatformThread::SetName(worker_thread_name.c_str());
     BT_VLOG << "Created worker=" << pthread_self() << " bthread=" << g->main_tid()
             << " tag=" << g->tag();
@@ -215,7 +216,7 @@ int TaskControl::init(int concurrency) {
         const int rc = pthread_create(&_workers[i], NULL, worker_thread, arg);
         if (rc) {
             delete arg;
-            LOG(ERROR) << "Fail to create _workers[" << i << "], " << berror(rc);
+            PLOG(ERROR) << "Fail to create _workers[" << i << "]";
             return -1;
         }
     }
@@ -259,8 +260,7 @@ int TaskControl::add_workers(int num, bthread_tag_t tag) {
                 &_workers[i + old_concurency], NULL, worker_thread, arg);
         if (rc) {
             delete arg;
-            LOG(WARNING) << "Fail to create _workers[" << i + old_concurency
-                         << "], " << berror(rc);
+            PLOG(WARNING) << "Fail to create _workers[" << i + old_concurency << "]";
             _concurrency.fetch_sub(1, butil::memory_order_release);
             break;
         }

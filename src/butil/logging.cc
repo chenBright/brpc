@@ -550,6 +550,7 @@ std::string LogInfoToLogStr(int severity, butil::StringPiece file,
     // A LogSink focused on performance should also be able to handle
     // non-continuous inputs which is a must to maximize performance.
     std::ostringstream os;
+    // todo 其实content不需要拷贝到os再拷贝出来的
     PrintLog(os, severity, file.data(), line, func.data(), content);
     os << '\n';
     return os.str();

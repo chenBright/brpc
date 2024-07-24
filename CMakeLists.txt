@@ -361,6 +361,8 @@ set(BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/src/butil/debug/proc_maps_linux.cc
     ${PROJECT_SOURCE_DIR}/src/butil/debug/stack_trace.cc
     ${PROJECT_SOURCE_DIR}/src/butil/debug/stack_trace_posix.cc
+    ${PROJECT_SOURCE_DIR}/src/butil/debug/leak_annotations.cc
+    ${PROJECT_SOURCE_DIR}/src/butil/debug/address_annotations.cc
     ${PROJECT_SOURCE_DIR}/src/butil/environment.cc
     ${PROJECT_SOURCE_DIR}/src/butil/files/file.cc
     ${PROJECT_SOURCE_DIR}/src/butil/files/file_posix.cc

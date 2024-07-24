@@ -139,7 +139,7 @@ void deallocate_stack_storage(StackStorage* s) {
         return;
     }
     s_stack_count.fetch_sub(1, butil::memory_order_relaxed);
-    if (s->guardsize <= 0) {
+    if (s->guardsize == 0) {
         free((char*)s->bottom - memsize);
     } else {
         munmap((char*)s->bottom - memsize, memsize);
@@ -149,5 +149,44 @@ void deallocate_stack_storage(StackStorage* s) {
 int* SmallStackClass::stack_size_flag = &FLAGS_stack_size_small;
 int* NormalStackClass::stack_size_flag = &FLAGS_stack_size_normal;
 int* LargeStackClass::stack_size_flag = &FLAGS_stack_size_large;
+
+namespace internal {
+//todo 全部都BUTIL_FORCE_INLINE吧
+void ASanPoisonMemoryRegion(const StackStorage& storage) {
+    if (NULL == storage.bottom) {
+        return;
+    }
+
+    CHECK_GT((void*)storage.bottom,
+             reinterpret_cast<void*>(storage.stacksize + + storage.guardsize));
+    butil::debug::ASanPoisonMemoryRegion(
+        (char*)storage.bottom - storage.stacksize,
+        storage.stacksize);
+}
+
+void ASanUnpoisonMemoryRegion(const StackStorage& storage) {
+    if (NULL == storage.bottom) {
+        return;
+    }
+    CHECK_GT(storage.bottom,
+             reinterpret_cast<void*>(storage.stacksize + storage.guardsize));
+    butil::debug::ASanUnpoisonMemoryRegion(
+        (char*)storage.bottom - storage.stacksize,
+        storage.stacksize);
+}
+
+void StartSwitchFiber(void** fake_stack_save, StackStorage& storage) {
+    if (NULL == storage.bottom) {
+        return;
+    }
+    RELEASE_ASSERT(storage.bottom >
+                   reinterpret_cast<void*>(storage.stacksize + storage.guardsize));
+    // Lowest address of this fiber's stack.
+    void* asan_stack_bottom = (char*)storage.bottom - storage.stacksize;
+    butil::debug::ASanStartSwitchFiber(
+        fake_stack_save, asan_stack_bottom, storage.stacksize);
+}
+
+}
 
 }  // namespace bthread

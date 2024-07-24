@@ -19,6 +19,7 @@ NEED_GPERFTOOLS=1
 NEED_GTEST=1
 include ../config.mk
 CPPFLAGS+=-DBTHREAD_USE_FAST_PTHREAD_MUTEX -D_GNU_SOURCE -DUSE_SYMBOLIZE -DNO_TCMALLOC -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -DUNIT_TEST -Dprivate=public -Dprotected=public -DBVAR_NOT_LINK_DEFAULT_VARIABLES --include sstream_workaround.h
+#CXXFLAGS=$(CPPFLAGS) -O0 -pipe -Wall -W -fPIC -fstrict-aliasing -Wno-invalid-offsetof -Wno-unused-parameter -fno-omit-frame-pointer -std=c++0x -fsanitize=address
 CXXFLAGS=$(CPPFLAGS) -pipe -Wall -W -fPIC -fstrict-aliasing -Wno-invalid-offsetof -Wno-unused-parameter -fno-omit-frame-pointer -std=c++0x
 
 #required by butil/crc32.cc to boost performance for 10x
@@ -163,16 +164,16 @@ endif
 
 UT_DYNAMIC_LINKINGS = $(DYNAMIC_LINKINGS) -lbrpc.dbg
 
-TEST_BUTIL_OBJS = iobuf.pb.o $(addsuffix .o, $(basename $(TEST_BUTIL_SOURCES))) 
+TEST_BUTIL_OBJS = iobuf.pb.o $(addsuffix .o, $(basename $(TEST_BUTIL_SOURCES)))
 
 TEST_BVAR_SOURCES = $(wildcard bvar_*_unittest.cpp)
-TEST_BVAR_OBJS = $(addsuffix .o, $(basename $(TEST_BVAR_SOURCES))) 
+TEST_BVAR_OBJS = $(addsuffix .o, $(basename $(TEST_BVAR_SOURCES)))
 
 TEST_BTHREAD_SOURCES = $(wildcard bthread_*unittest.cpp)
-TEST_BTHREAD_OBJS = $(addsuffix .o, $(basename $(TEST_BTHREAD_SOURCES))) 
+TEST_BTHREAD_OBJS = $(addsuffix .o, $(basename $(TEST_BTHREAD_SOURCES)))
 
 TEST_BRPC_SOURCES = $(wildcard brpc_*unittest.cpp)
-TEST_BRPC_OBJS = $(addsuffix .o, $(basename $(TEST_BRPC_SOURCES))) 
+TEST_BRPC_OBJS = $(addsuffix .o, $(basename $(TEST_BRPC_SOURCES)))
 
 TEST_PROTO_SOURCES = $(wildcard *.proto)
 TEST_PROTO_OBJS = $(TEST_PROTO_SOURCES:.proto=.pb.o)
@@ -221,8 +222,10 @@ endif
 bthread%unittest:bthread%unittest.o | libbrpc.dbg.$(SOEXT)
 	@echo "> Linking $@"
 ifeq ($(SYSTEM),Linux)
-	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) -Xlinker "-(" $^ -Xlinker "-)" $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
+	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) -Xlinker "-(" $^ -Xlinker "-)" $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)  -fsanitize=address
+#	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) -Xlinker "-(" $^ -Xlinker "-)" $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
 else ifeq ($(SYSTEM),Darwin)
+#	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) $^ $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS) -fsanitize=address
 	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) $^ $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
 endif
 

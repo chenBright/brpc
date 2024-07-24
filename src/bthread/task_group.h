@@ -81,7 +81,7 @@ public:
     // Suspend caller and run bthread `next_tid' in TaskGroup *pg.
     // Purpose of this function is to avoid pushing `next_tid' to _rq and
     // then being popped by sched(pg), which is not necessary.
-    static void sched_to(TaskGroup** pg, TaskMeta* next_meta);
+    static void sched_to(TaskGroup** pg, TaskMeta* next_meta, bool cur_ending);
     static void sched_to(TaskGroup** pg, bthread_t next_tid);
     static void exchange(TaskGroup** pg, bthread_t next_tid);
 
@@ -188,7 +188,7 @@ private:
 friend class TaskControl;
 
     // You shall use TaskControl::create_group to create new instance.
-    explicit TaskGroup(TaskControl*);
+    TaskGroup(TaskControl* c);
 
     int init(size_t runqueue_capacity);
 
@@ -196,6 +196,11 @@ friend class TaskControl;
     // of groups are postponed to avoid race.
     ~TaskGroup();
 
+    static void pthread_task_runner() {
+        task_runner(1/*skip remained*/);
+    }
+
+    static void bthread_task_runner(intptr_t);
     static void task_runner(intptr_t skip_remained);
 
     // Callbacks for set_remained()
