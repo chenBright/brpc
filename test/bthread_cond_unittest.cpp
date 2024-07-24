@@ -21,7 +21,7 @@
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "butil/scoped_lock.h"
-#include "butil/gperftools_profiler.h"
+// #include "butil/gperftools_profiler.h"
 #include "bthread/bthread.h"
 #include "bthread/condition_variable.h"
 #include "bthread/stack.h"
@@ -262,7 +262,7 @@ TEST(CondTest, ping_pong) {
     arg.stopped = false;
     arg.nthread = 0;
     bthread_t threads[2];
-    ProfilerStart("cond.prof");
+    // ProfilerStart("cond.prof");
     for (int i = 0; i < 2; ++i) {
         ASSERT_EQ(0, bthread_start_urgent(&threads[i], NULL, ping_pong_thread, &arg));
     }
@@ -273,7 +273,7 @@ TEST(CondTest, ping_pong) {
     for (int i = 0; i < 2; ++i) {
         ASSERT_EQ(0, bthread_join(threads[i], NULL));
     }
-    ProfilerStop();
+    // ProfilerStop();
     LOG(INFO) << "total_count=" << arg.total_count.load();
 }
 

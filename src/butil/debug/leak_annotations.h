@@ -19,7 +19,6 @@
 // ANNOTATE_LEAKING_OBJECT_PTR(X): the heap object referenced by pointer X will
 // be annotated as a leak.
 
-#if defined(LEAK_SANITIZER) && !defined(OS_NACL)
 
 // Public LSan API from <sanitizer/lsan_interface.h>.
 extern "C" {
@@ -32,24 +31,15 @@ void __lsan_do_leak_check();
 }  // extern "C"
 
 class ScopedLeakSanitizerDisabler {
- public:
+public:
   ScopedLeakSanitizerDisabler() { __lsan_disable(); }
   ~ScopedLeakSanitizerDisabler() { __lsan_enable(); }
- private:
-  DISALLOW_COPY_AND_ASSIGN(ScopedLeakSanitizerDisabler);
+    DISALLOW_COPY_AND_ASSIGN(ScopedLeakSanitizerDisabler);
 };
 
 #define ANNOTATE_SCOPED_MEMORY_LEAK \
     ScopedLeakSanitizerDisabler leak_sanitizer_disabler; static_cast<void>(0)
 
 #define ANNOTATE_LEAKING_OBJECT_PTR(X) __lsan_ignore_object(X);
-
-#else
-
-// If neither HeapChecker nor LSan are used, the annotations should be no-ops.
-#define ANNOTATE_SCOPED_MEMORY_LEAK ((void)0)
-#define ANNOTATE_LEAKING_OBJECT_PTR(X) ((void)0)
-
-#endif
 
 #endif  // BUTIL_DEBUG_LEAK_ANNOTATIONS_H_

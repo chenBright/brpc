@@ -22,6 +22,7 @@
 #include <sys/stat.h>                               // mkdir
 #include <gflags/gflags.h>
 #include <google/protobuf/descriptor.h>             // ServiceDescriptor
+#include <butil/debug/leak_annotations.h>
 #include "idl_options.pb.h"                         // option(idl_support)
 #include "bthread/unstable.h"                       // bthread_keytable_pool_init
 #include "butil/macros.h"                            // ARRAY_SIZE
@@ -890,6 +891,12 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
         _session_local_data_pool->Reserve(_options.reserved_session_local_data);
     }
 
+    // https://github.com/apache/brpc/issues/1390
+    // https://github.com/apache/brpc/issues/2164
+    // _keytable_pool leak id accepted by design.
+    // See comments in Server::Join() for details.
+    // Instruct LeakSanitizer to ignore this certain leak.
+    ANNOTATE_SCOPED_MEMORY_LEAK;
     // Init _keytable_pool always. If the server was stopped before, the pool
     // should be destroyed in Join().
     _keytable_pool = new bthread_keytable_pool_t;
