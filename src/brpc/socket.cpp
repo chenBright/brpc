@@ -1992,6 +1992,7 @@ int Socket::SSLHandshake(int fd, bool server_mode) {
         }
         return 0;
     }
+    _ssl_state = SSL_CONNECTING;
 
     // TODO: Reuse ssl session id for client
     if (_ssl_session) {
@@ -2008,8 +2009,6 @@ int Socket::SSLHandshake(int fd, bool server_mode) {
         SSL_set_tlsext_host_name(_ssl_session, _ssl_ctx->sni_name.c_str());
     }
 #endif
-
-    _ssl_state = SSL_CONNECTING;
 
     // Loop until SSL handshake has completed. For SSL_ERROR_WANT_READ/WRITE,
     // we use bthread_fd_wait as polling mechanism instead of EventDispatcher

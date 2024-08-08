@@ -682,7 +682,7 @@ private:
     // Create SSL session inside and block (in bthread) until handshake
     // has completed. Application layer I/O is forbidden during this
     // process to avoid concurrent I/O on the underlying fd
-    // Returns 0 on success, -1 otherwise
+    // Returns 0 on success, -1 otherwise.
     int SSLHandshake(int fd, bool server_mode);
 
     // Based upon whether the underlying channel is using SSL (if

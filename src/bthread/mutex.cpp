@@ -422,20 +422,47 @@ static void init_sys_mutex_lock() {
     // TODO: may need dlvsym when GLIBC has multiple versions of a same symbol.
     // http://blog.fesnel.com/blog/2009/08/25/preloading-with-multiple-symbol-versions
     if (_dl_sym) {
-        sys_pthread_mutex_lock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_lock", (void*)init_sys_mutex_lock);
+      sys_pthread_mutex_trylock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_trylock");
+      sys_pthread_mutex_lock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_lock", (void*)init_sys_mutex_lock);
+      auto global_pthread_mutex_lock = (MutexOp)_dl_sym(RTLD_DEFAULT, "pthread_mutex_lock", (void*)init_sys_mutex_lock);
+
+        Dl_info dlInfo;
+        if(!dladdr((void*)global_pthread_mutex_lock, &dlInfo)) {
+            // dladdr() failed.
+            std::cout << "dladdr() failed" << std::endl;
+        } else {
+            std::cout << "dlInfo.dli_fname: " << dlInfo.dli_fname << std::endl;
+        }
         sys_pthread_mutex_unlock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_unlock", (void*)init_sys_mutex_lock);
+        sys_pthread_mutex_trylock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_trylock");
+        if (sys_pthread_mutex_trylock == NULL) {
+            std::cout << "sys_pthread_mutex_unlock is NULL" << std::endl;
+        }
+        if(!dladdr((void*)sys_pthread_mutex_trylock, &dlInfo)) {
+            // dladdr() failed.
+            std::cout << "dladdr() failed" << std::endl;
+        } else {
+            std::cout << "dlInfo.dli_fname: " << dlInfo.dli_fname << std::endl;
+        }
     } else {
         // _dl_sym may be undefined reference in some system, fallback to dlsym
         sys_pthread_mutex_lock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_lock");
         sys_pthread_mutex_unlock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_unlock");
+        // sys_pthread_mutex_trylock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_trylock");
     }
-    // In some system, _dl_sym may cause symbol lookup error: undefined symbol: pthread_mutex_trylock.
-    sys_pthread_mutex_trylock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_trylock");
 #elif defined(OS_MACOSX)
     // TODO: look workaround for dlsym on mac
     sys_pthread_mutex_lock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_lock");
     sys_pthread_mutex_trylock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_trylock");
     sys_pthread_mutex_unlock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_unlock");
+
+    Dl_info dlInfo;
+    if(!dladdr((void*)sys_pthread_mutex_lock, &dlInfo)) {
+        // dladdr() failed.
+        std::cout << "dladdr() failed" << std::endl;
+    } else {
+        std::cout << "dlInfo.dli_fname: " << dlInfo.dli_fname << std::endl;
+    }
 #endif
 }
 
@@ -956,9 +983,9 @@ int bthread_mutex_unlock(bthread_mutex_t* m) {
 int pthread_mutex_lock(pthread_mutex_t* __mutex) {
     return bthread::pthread_mutex_lock_impl(__mutex);
 }
-int pthread_mutex_trylock(pthread_mutex_t* __mutex) {
-    return bthread::pthread_mutex_trylock_impl(__mutex);
-}
+// int pthread_mutex_trylock(pthread_mutex_t* __mutex) {
+//     return bthread::pthread_mutex_trylock_impl(__mutex);
+// }
 int pthread_mutex_unlock(pthread_mutex_t* __mutex) {
     return bthread::pthread_mutex_unlock_impl(__mutex);
 }

@@ -438,6 +438,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
             break;
         }
 
+        // todo 加个开关？
         if (socket->is_overcrowded()) {
             cntl->SetFailed(EOVERCROWDED, "Connection to %s is overcrowded",
                             butil::endpoint2str(socket->remote_side()).c_str());

@@ -164,6 +164,15 @@ struct ServerSSLOptions {
 // Legacy name defined in server.h
 typedef ServerSSLOptions SSLOptions;
 
+// class SSLContextFactory {
+// public:
+//     virtual ~SSLContextFactory() = default;
+//
+//     virtual SSL* SSLHandshake(int fd) = 0;
+//
+//     virtual void Shutdown(int fd) = 0;
+// };
+
 } // namespace brpc
 
 #endif // BRPC_SSL_OPTION_H
