@@ -21,9 +21,11 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netdb.h>                   //
+#include <netdb.h>
 #include <gtest/gtest.h>
+#ifndef BRPC_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BRPC_USE_ASAN
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "butil/fd_utility.h"
@@ -180,9 +182,12 @@ TEST_F(MessengerTest, dispatch_tasks) {
     }
 
     sleep(1);
-    
+
+
+#ifndef BRPC_USE_ASAN
     LOG(INFO) << "Begin to profile... (5 seconds)";
     ProfilerStart("input_messenger.prof");
+#endif // BRPC_USE_ASAN
 
     size_t start_client_bytes = 0;
     for (size_t i = 0; i < NCLIENT; ++i) {
@@ -194,8 +199,11 @@ TEST_F(MessengerTest, dispatch_tasks) {
     sleep(5);
     
     tm.stop();
+
+#ifndef BRPC_USE_ASAN
     ProfilerStop();
     LOG(INFO) << "End profiling";
+#endif // BRPC_USE_ASAN
 
     client_stop = true;
 

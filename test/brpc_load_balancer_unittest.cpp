@@ -23,7 +23,9 @@
 #include <map>
 #include <gtest/gtest.h>
 #include "bthread/bthread.h"
+#ifndef BRPC_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BRPC_USE_ASAN
 #include "butil/containers/doubly_buffered_data.h"
 #include "brpc/describable.h"
 #include "brpc/socket.h"
@@ -250,7 +252,9 @@ void PerfTest(int thread_num, bool modify_during_reading) {
     g_started = true;
     char prof_name[32];
     snprintf(prof_name, sizeof(prof_name), "doubly_buffered_data_%d.prof", ++g_prof_name_counter);
+#ifndef BRPC_USE_ASAN
     ProfilerStart(prof_name);
+#endif // BRPC_USE_ASAN
     int64_t run_ms = 5 * 1000;
     if (modify_during_reading) {
         int64_t start = butil::gettimeofday_ms();
@@ -262,7 +266,9 @@ void PerfTest(int thread_num, bool modify_during_reading) {
     } else {
         usleep(run_ms * 1000);
     }
+#ifndef BRPC_USE_ASAN
     ProfilerStop();
+#endif // BRPC_USE_ASAN
     g_stopped = true;
     int64_t wait_time = 0;
     int64_t count = 0;
@@ -640,9 +646,13 @@ TEST_F(LoadBalancerTest, fairness) {
             ASSERT_EQ(0, pthread_create(&th[i], NULL, select_server, &sa));
         }
         bthread_usleep(10000);
+#ifndef BRPC_USE_ASAN
         ProfilerStart((lb_name + ".prof").c_str());
+#endif // BRPC_USE_ASAN
         bthread_usleep(300000);
+#ifndef BRPC_USE_ASAN
         ProfilerStop();
+#endif // BRPC_USE_ASAN
 
         global_stop = true;
         

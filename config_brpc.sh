@@ -38,11 +38,12 @@ else
     LDD=ldd
 fi
 
-TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,nodebugsymbols -n 'config_brpc' -- "$@"`
+TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,with-asan,nodebugsymbols -n 'config_brpc' -- "$@"`
 WITH_GLOG=0
 WITH_THRIFT=0
 WITH_RDMA=0
 WITH_MESALINK=0
+WITH_ASAN=0
 DEBUGSYMBOLS=-g
 
 if [ $? != 0 ] ; then >&2 $ECHO "Terminating..."; exit 1 ; fi
@@ -67,6 +68,7 @@ while true; do
         --with-thrift) WITH_THRIFT=1; shift 1 ;;
         --with-rdma) WITH_RDMA=1; shift 1 ;;
         --with-mesalink) WITH_MESALINK=1; shift 1 ;;
+        --with-asan) WITH_ASAN=1; shift 1 ;;
         --nodebugsymbols ) DEBUGSYMBOLS=; shift 1 ;;
         -- ) shift; break ;;
         * ) break ;;
@@ -344,6 +346,12 @@ else
     CXXFLAGS="-std=c++0x"
 fi
 
+if [ $WITH_ASAN != 0 ]; then
+  CPPFLAGS="-DBAIDU_CLEAR_OBJECT_POOL_AFTER_ALL_THREADS_QUIT"
+  CXXFLAGS="$CXXFLAGS -fsanitize=address"
+  DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -fsanitize=address"
+fi
+
 LEVELDB_HDR=$(find_dir_of_header_or_die leveldb/db.h)
 
 HDRS=$($ECHO "$GFLAGS_HDR\n$PROTOBUF_HDR\n$ABSL_HDR\n$LEVELDB_HDR\n$OPENSSL_HDR" | sort | uniq)
@@ -405,7 +413,7 @@ append_to_output "STATIC_LINKINGS=$STATIC_LINKINGS"
 append_to_output "DYNAMIC_LINKINGS=$DYNAMIC_LINKINGS"
 
 # CPP means C PreProcessing, not C PlusPlus
-CPPFLAGS="-DBRPC_WITH_GLOG=$WITH_GLOG -DGFLAGS_NS=$GFLAGS_NS"
+CPPFLAGS="${CPPFLAGS} -DBRPC_WITH_GLOG=$WITH_GLOG -DGFLAGS_NS=$GFLAGS_NS"
 
 # Avoid over-optimizations of TLS variables by GCC>=4.8
 # See: https://github.com/apache/brpc/issues/1693
@@ -545,6 +553,16 @@ else
     append_to_output_linkings $GTEST_LIB gtest "    "
     append_to_output_linkings $GTEST_LIB gtest_main "    "
 fi
+#append_to_output "ifeq (\$(NEED_GTEST), 1)"
+#if [ -z "$GTEST_LIB" ]; then
+#    append_to_output "    \$(error \"Fail to find gtest\")"
+#else
+#    GTEST_HDR=$(find_dir_of_header_or_die gtest/gtest.h)
+#    append_to_output_libs $GTEST_LIB "    "
+#    append_to_output_headers $GTEST_HDR "    "
+#    append_to_output_linkings $GTEST_LIB gtest "    "
+#    append_to_output_linkings $GTEST_LIB gtest_main "    "
+#fi
 append_to_output "endif"
 
 # generate src/butil/config.h

@@ -459,6 +459,13 @@ TimeVal GetTimestamp() {
 }
 
 struct BAIDU_CACHELINE_ALIGNMENT LogInfo {
+    ~LogInfo() = default;
+    void clear() {
+        file.clear();
+        func.clear();
+        content.clear();
+    }
+
     std::string file;
     std::string func;
     std::string content;
@@ -550,6 +557,7 @@ std::string LogInfoToLogStr(int severity, butil::StringPiece file,
     // A LogSink focused on performance should also be able to handle
     // non-continuous inputs which is a must to maximize performance.
     std::ostringstream os;
+    // todo 其实content不需要拷贝到os再拷贝出来的
     PrintLog(os, severity, file.data(), line, func.data(), content);
     os << '\n';
     return os.str();
@@ -746,7 +754,7 @@ bool AsyncLogger::IsLogComplete(LogRequest* old_head) {
 
 void AsyncLogger::DoLog(LogRequest* req) {
     DoLog(req->log_info);
-    req->log_info.content.clear();
+    req->log_info.clear();
 }
 
 void AsyncLogger::DoLog(const LogInfo& log_info) {

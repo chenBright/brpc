@@ -60,7 +60,10 @@ struct BAIDU_CACHELINE_ALIGNMENT TaskNode {
         , q(NULL)
     {}
     ~TaskNode() {}
-    int cancel(int64_t expected_version) {
+
+    // `TaskNode' may have been returned to the `ObjectPool' and poisoned,
+    // so need to instruct ASan to ignore this function.
+    BRPC_ATTRIBUTE_NO_SANITIZE_ADDRESS int cancel(int64_t expected_version) {
         BAIDU_SCOPED_LOCK(mutex);
         if (version != expected_version) {
             return -1;

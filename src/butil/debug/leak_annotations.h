@@ -19,7 +19,7 @@
 // ANNOTATE_LEAKING_OBJECT_PTR(X): the heap object referenced by pointer X will
 // be annotated as a leak.
 
-#if defined(LEAK_SANITIZER) && !defined(OS_NACL)
+#if (defined(LEAK_SANITIZER) && !defined(OS_NACL)) || defined(BRPC_USE_ASAN)
 
 // Public LSan API from <sanitizer/lsan_interface.h>.
 extern "C" {
@@ -32,7 +32,7 @@ void __lsan_do_leak_check();
 }  // extern "C"
 
 class ScopedLeakSanitizerDisabler {
- public:
+public:
   ScopedLeakSanitizerDisabler() { __lsan_disable(); }
   ~ScopedLeakSanitizerDisabler() { __lsan_enable(); }
  private:

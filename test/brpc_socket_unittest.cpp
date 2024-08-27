@@ -24,7 +24,9 @@
 #include <fcntl.h>  // F_GETFD
 #include <gtest/gtest.h>
 #include <gflags/gflags.h>
+#ifndef BRPC_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BRPC_USE_ASAN
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "butil/fd_utility.h"
@@ -1014,13 +1016,17 @@ TEST_F(SocketTest, multi_threaded_write_perf) {
     pthread_create(&rth, NULL, reader, &reader_arg);
 
     butil::Timer tm;
+#ifndef BRPC_USE_ASAN
     ProfilerStart("write.prof");
+#endif // BRPC_USE_ASAN
     const uint64_t old_nread = reader_arg.nread;
     tm.start();
     sleep(2);
     tm.stop();
     const uint64_t new_nread = reader_arg.nread;
+#ifndef BRPC_USE_ASAN
     ProfilerStop();
+#endif // BRPC_USE_ASAN
 
     printf("tp=%" PRIu64 "M/s\n", (new_nread - old_nread) / tm.u_elapsed());
     

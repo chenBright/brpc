@@ -23,7 +23,9 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <gtest/gtest.h>
+#ifndef BRPC_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BRPC_USE_ASAN
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "butil/fd_utility.h"
@@ -342,16 +344,18 @@ TEST_F(EventDispatcherTest, dispatch_tasks) {
     }
     
     LOG(INFO) << "Begin to profile... (5 seconds)";
+#ifndef BRPC_USE_ASAN
     ProfilerStart("event_dispatcher.prof");
+#endif // BRPC_USE_ASAN
     butil::Timer tm;
     tm.start();
-    
     sleep(5);
-    
     tm.stop();
+#ifndef BRPC_USE_ASAN
     ProfilerStop();
     LOG(INFO) << "End profiling";
-    
+#endif // BRPC_USE_ASAN
+
     size_t client_bytes = 0;
     size_t server_bytes = 0;
     for (size_t i = 0; i < NCLIENT; ++i) {

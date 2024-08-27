@@ -25,7 +25,9 @@
 #include "butil/atomicops.h"
 #include "brpc/policy/http_rpc_protocol.h"
 #include "brpc/policy/http2_rpc_protocol.h"
+#ifndef BRPC_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BRPC_USE_ASAN
 
 int main(int argc, char* argv[]) {
     testing::InitGoogleTest(&argc, argv);
@@ -56,14 +58,18 @@ TEST(H2UnsentMessage, request_throughput) {
 
     // calc H2UnsentRequest throughput
     butil::IOBuf dummy_buf;
+#ifndef BRPC_USE_ASAN
     ProfilerStart("h2_unsent_req.prof");
+#endif // BRPC_USE_ASAN
     int64_t start_us = butil::gettimeofday_us();
     for (int i = 0; i < ntotal; ++i) {
         brpc::policy::H2UnsentRequest* req = brpc::policy::H2UnsentRequest::New(&cntl);
         req->AppendAndDestroySelf(&dummy_buf, h2_client_sock.get());
     }
     int64_t end_us = butil::gettimeofday_us();
+#ifndef BRPC_USE_ASAN
     ProfilerStop();
+#endif // BRPC_USE_ASAN
     int64_t elapsed = end_us - start_us;
     LOG(INFO) << "H2UnsentRequest average qps="
         << (ntotal * 1000000L) / elapsed << "/s, data throughput="
