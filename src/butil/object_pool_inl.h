@@ -25,11 +25,13 @@
 #include <iostream>                      // std::ostream
 #include <pthread.h>                     // pthread_mutex_t
 #include <algorithm>                     // std::max, std::min
+#include <vector>
 #include "butil/atomicops.h"              // butil::atomic
 #include "butil/macros.h"                 // BAIDU_CACHELINE_ALIGNMENT
 #include "butil/scoped_lock.h"            // BAIDU_SCOPED_LOCK
 #include "butil/thread_local.h"           // BAIDU_THREAD_LOCAL
-#include <vector>
+#include "butil/debug/address_annotations.h"
+#include "butil/memory/aligned_memory.h"
 
 #ifdef BUTIL_OBJECT_POOL_NEED_FREE_ITEM_NUM
 #define BAIDU_OBJECT_POOL_FREE_ITEM_NUM_ADD1                    \
@@ -53,7 +55,34 @@ template <typename T>
 struct ObjectPoolFreeChunk<T, 0> {
     size_t nfree;
     T* ptrs[0];
-}; 
+};
+
+#ifdef BRPC_USE_ASAN
+template <typename T, size_t NITEM>
+class ObjectPoolQuarantineChunk {
+public:
+    ObjectPoolQuarantineChunk() : _start(0), _count(0) {}
+
+    T* ElimPush(T* ptr) {
+        T* res = NULL;
+        if (_count == NITEM) {
+            res = _ptrs[_start];
+            _start = Mod(_start + 1);
+        }
+        _ptrs[Mod(_start + _count)] = ptr;
+        ++_count;
+        return res;
+    }
+
+private:
+    uint32_t Mod(uint32_t off) {
+        return off % NITEM;
+    }
+    uint32_t _start;
+    uint32_t _count;
+    T* _ptrs[NITEM];
+};
+#endif
 
 struct ObjectPoolInfo {
     size_t local_pool_num;
@@ -87,17 +116,24 @@ class BAIDU_CACHELINE_ALIGNMENT ObjectPool {
 public:
     static const size_t BLOCK_NITEM = ObjectPoolBlockItemNum<T>::value;
     static const size_t FREE_CHUNK_NITEM = BLOCK_NITEM;
+#ifdef BRPC_USE_ASAN
+    static const size_t Quarantine_CHUNK_NITEM = BLOCK_NITEM;
+#endif
 
     // Free objects are batched in a FreeChunk before they're added to
     // global list(_free_chunks).
     typedef ObjectPoolFreeChunk<T, FREE_CHUNK_NITEM>    FreeChunk;
     typedef ObjectPoolFreeChunk<T, 0> DynamicFreeChunk;
+#ifdef BRPC_USE_ASAN
+    typedef ObjectPoolQuarantineChunk<T, Quarantine_CHUNK_NITEM> QuarantineChunk;
+#endif
+    typedef butil::AlignedMemory<sizeof(T) + 7 & ~7, alignof(T)> AlignedMemory;
 
     // When a thread needs memory, it allocates a Block. To improve locality,
     // items in the Block are only used by the thread.
     // To support cache-aligned objects, align Block.items by cacheline.
     struct BAIDU_CACHELINE_ALIGNMENT Block {
-        char items[sizeof(T) * BLOCK_NITEM];
+        AlignedMemory items[BLOCK_NITEM];
         size_t nitem;
 
         Block() : nitem(0) {}
@@ -160,45 +196,60 @@ public:
         }                                                               \
         /* Fetch memory from local block */                             \
         if (_cur_block && _cur_block->nitem < BLOCK_NITEM) {            \
-            T* obj = new ((T*)_cur_block->items + _cur_block->nitem) T CTOR_ARGS; \
+            T* obj = new ((T*)_cur_block->items[_cur_block->nitem].void_data()) T CTOR_ARGS; \
             if (!ObjectPoolValidator<T>::validate(obj)) {               \
                 obj->~T();                                              \
                 return NULL;                                            \
             }                                                           \
+            BRPC_ASAN_POISON_MEMORY_REGION(obj, sizeof(AlignedMemory));    \
             ++_cur_block->nitem;                                        \
             return obj;                                                 \
         }                                                               \
         /* Fetch a Block from global */                                 \
         _cur_block = add_block(&_cur_block_index);                      \
         if (_cur_block != NULL) {                                       \
-            T* obj = new ((T*)_cur_block->items + _cur_block->nitem) T CTOR_ARGS; \
+            T* obj = new ((T*)_cur_block->items[_cur_block->nitem].void_data()) T CTOR_ARGS; \
             if (!ObjectPoolValidator<T>::validate(obj)) {               \
                 obj->~T();                                              \
                 return NULL;                                            \
             }                                                           \
+            BRPC_ASAN_POISON_MEMORY_REGION(obj, sizeof(AlignedMemory));    \
             ++_cur_block->nitem;                                        \
             return obj;                                                 \
         }                                                               \
         return NULL;                                                    \
- 
 
-        inline T* get() {
-            BAIDU_OBJECT_POOL_GET();
+
+        template<typename... Args>
+        inline T* get(Args... args) {
+            BAIDU_OBJECT_POOL_GET((std::forward<Args>(args)...));
         }
 
-        template <typename A1>
-        inline T* get(const A1& a1) {
-            BAIDU_OBJECT_POOL_GET((a1));
-        }
-
-        template <typename A1, typename A2>
-        inline T* get(const A1& a1, const A2& a2) {
-            BAIDU_OBJECT_POOL_GET((a1, a2));
-        }
+        // inline T* get() {
+        //     BAIDU_OBJECT_POOL_GET();
+        // }
+        //
+        // template <typename A1>
+        // inline T* get(const A1& a1) {
+        //     BAIDU_OBJECT_POOL_GET((a1));
+        // }
+        //
+        // template <typename A1, typename A2>
+        // inline T* get(const A1& a1, const A2& a2) {
+        //     BAIDU_OBJECT_POOL_GET((a1, a2));
+        // }
 
 #undef BAIDU_OBJECT_POOL_GET
 
         inline int return_object(T* ptr) {
+            if (NULL == ptr) {
+                return 0;
+            }
+
+#ifdef BRPC_USE_ASAN
+            // ptr = _cur_quarantine.ElimPush(ptr);
+            BRPC_ASAN_POISON_MEMORY_REGION(ptr, sizeof(T));
+#endif
             // Return to local free list
             if (_cur_free.nfree < ObjectPool::free_chunk_nitem()) {
                 _cur_free.ptrs[_cur_free.nfree++] = ptr;
@@ -225,6 +276,9 @@ public:
         Block* _cur_block;
         size_t _cur_block_index;
         FreeChunk _cur_free;
+#ifdef BRPC_USE_ASAN
+        QuarantineChunk _cur_quarantine;
+#endif
     };
 
     inline bool local_free_empty() {
@@ -235,31 +289,53 @@ public:
         return true;
     }
 
-    inline T* get_object() {
+    template<typename... Args>
+    inline T* get_object(Args... args) {
         LocalPool* lp = get_or_new_local_pool();
+        T* ptr = NULL;
         if (BAIDU_LIKELY(lp != NULL)) {
-            return lp->get();
+            ptr = lp->get(std::forward<Args>(args)...);
+#ifdef BRPC_USE_ASAN
+            // if (BRPC_ASAN_ADDRESS_IS_POISONED(ptr) == 0) {
+            //     LOG(ERROR) << "unpoison=" << ptr;
+            // } else {
+            //     LOG(ERROR) << "poison=" << ptr;
+            // }
+            if (NULL == ptr) {
+                LOG(ERROR) << "NULL ptr";
+                return NULL;
+            }
+            BRPC_ASAN_UNPOISON_MEMORY_REGION(ptr, sizeof(T));
+#endif
         }
-        return NULL;
+        return ptr;
     }
 
-    template <typename A1>
-    inline T* get_object(const A1& arg1) {
-        LocalPool* lp = get_or_new_local_pool();
-        if (BAIDU_LIKELY(lp != NULL)) {
-            return lp->get(arg1);
-        }
-        return NULL;
-    }
-
-    template <typename A1, typename A2>
-    inline T* get_object(const A1& arg1, const A2& arg2) {
-        LocalPool* lp = get_or_new_local_pool();
-        if (BAIDU_LIKELY(lp != NULL)) {
-            return lp->get(arg1, arg2);
-        }
-        return NULL;
-    }
+    // inline T* get_object() {
+    //     LocalPool* lp = get_or_new_local_pool();
+    //     if (BAIDU_LIKELY(lp != NULL)) {
+    //         return lp->get();
+    //     }
+    //     return NULL;
+    // }
+    //
+    // template <typename A1>
+    // inline T* get_object(const A1& arg1) {
+    //     LocalPool* lp = get_or_new_local_pool();
+    //     if (BAIDU_LIKELY(lp != NULL)) {
+    //         return lp->get(arg1);
+    //     }
+    //     return NULL;
+    // }
+    //
+    // template <typename A1, typename A2>
+    // inline T* get_object(const A1& arg1, const A2& arg2) {
+    //     LocalPool* lp = get_or_new_local_pool();
+    //     if (BAIDU_LIKELY(lp != NULL)) {
+    //         return lp->get(arg1, arg2);
+    //     }
+    //     return NULL;
+    // }
 
     inline int return_object(T* ptr) {
         LocalPool* lp = get_or_new_local_pool();
@@ -449,8 +525,11 @@ private:
                     continue;
                 }
                 for (size_t k = 0; k < b->nitem; ++k) {
-                    T* const objs = (T*)b->items;
-                    objs[k].~T();
+                    T* obj = (T*)&b->items[k];
+                    BRPC_ASAN_UNPOISON_MEMORY_REGION(obj, sizeof(AlignedMemory));
+                    obj->~T();
+                    // if (NULL != objs && BRPC_ASAN_ADDRESS_IS_POISONED(objs)) {
+                    // }
                 }
                 delete b;
             }

@@ -26,7 +26,7 @@ test_bins="test_butil test_bvar bthread*unittest brpc*unittest"
 for test_bin in $test_bins; do
     test_num=$((test_num + 1))
     >&2 echo "[runtest] $test_bin"
-    ./$test_bin
+    ASAN_OPTIONS="fast_unwind_on_malloc=0:detect_leaks=0" ./$test_bin
     rc=$?
     if [ $rc -ne 0 ]; then
         failed_test="$test_bin"

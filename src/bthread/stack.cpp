@@ -37,6 +37,7 @@ DEFINE_int32(stack_size_large, 8388608, "size of large stacks");
 DEFINE_int32(guard_page_size, 4096, "size of guard page, allocate stacks by malloc if it's 0(not recommended)");
 DEFINE_int32(tc_stack_small, 32, "maximum small stacks cached by each thread");
 DEFINE_int32(tc_stack_normal, 8, "maximum normal stacks cached by each thread");
+DEFINE_uint32(stack_quarantine_queue_size, 10, "");
 
 namespace bthread {
 
@@ -139,7 +140,7 @@ void deallocate_stack_storage(StackStorage* s) {
         return;
     }
     s_stack_count.fetch_sub(1, butil::memory_order_relaxed);
-    if (s->guardsize <= 0) {
+    if (s->guardsize == 0) {
         free((char*)s->bottom - memsize);
     } else {
         munmap((char*)s->bottom - memsize, memsize);

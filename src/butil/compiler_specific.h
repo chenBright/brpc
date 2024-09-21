@@ -201,7 +201,29 @@
 // If available, it would look like:
 //   __attribute__((format(wprintf, format_param, dots_param)))
 
-// MemorySanitizer annotations.
+
+// Compiler feature-detection.
+// clang.llvm.org/docs/LanguageExtensions.html#has-feature-and-has-extension
+#if defined(__has_feature)
+#define BRPC_HAS_FEATURE(FEATURE) __has_feature(FEATURE)
+#else
+#define BRPC_HAS_FEATURE(FEATURE) 0
+#endif
+
+// AddressSanitizer annotations.
+#if BRPC_HAS_FEATURE(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#define BRPC_USE_ASAN 1
+#endif
+
+// https://github.com/google/sanitizers/wiki/AddressSanitizer#turning-off-instrumentation
+// Attribute to instruct ASan to ignore a function.
+#if defined(COMPILER_GCC)
+# define BRPC_ATTRIBUTE_NO_SANITIZE_ADDRESS __attribute__((no_sanitize_address))
+#else
+# define BRPC_ATTRIBUTE_NO_SANITIZE_ADDRESS
+#endif
+
+// MemorySanitizer detection.
 #if defined(MEMORY_SANITIZER) && !defined(OS_NACL)
 #include <sanitizer/msan_interface.h>
 

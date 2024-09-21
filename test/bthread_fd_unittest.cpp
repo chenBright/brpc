@@ -16,13 +16,16 @@
 // under the License.
 
 #include "butil/compat.h"
+#include "butil/compiler_specific.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>                           // uname
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <pthread.h>
+#ifndef BRPC_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BRPC_USE_ASAN
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "butil/fd_utility.h"
@@ -304,7 +307,9 @@ TEST(FDTest, ping_pong) {
 #endif
     }
 
+#ifndef BRPC_USE_ASAN
     ProfilerStart("ping_pong.prof");
+#endif // BRPC_USE_ASAN
     butil::Timer tm;
     tm.start();
 
@@ -327,7 +332,9 @@ TEST(FDTest, ping_pong) {
         ASSERT_EQ(i + REP * NCLIENT, cm[i]->count);
     }
     tm.stop();
+#ifndef BRPC_USE_ASAN
     ProfilerStop();
+#endif // BRPC_USE_ASAN
     LOG(INFO) << "tid=" << REP*NCLIENT*1000000L/tm.u_elapsed();
     stop = true;
     for (size_t i = 0; i < NEPOLL; ++i) {

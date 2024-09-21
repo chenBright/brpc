@@ -68,6 +68,7 @@ TEST(RWLockTest, rdlock_performance) {
         long* res = NULL;
         pthread_join(rth[i], (void**)&res);
         printf("read thread %lu = %ldns\n", i, *res);
+        delete res;
     }
     pthread_join(wth, NULL);
 #ifdef CHECK_RWLOCK
