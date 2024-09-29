@@ -534,6 +534,51 @@ TEST_F(LoggingTest, async_log) {
     FLAGS_async_log = saved_async_log;
 }
 
+
+class UTLogStreamFactory : public LogStreamFactory {
+public:
+    LogStreamBase* Get(const LogMeta& log_meta) override {
+        LogStream* stream = new LogStream;
+        stream->SetLogMeta(log_meta);
+        return stream;
+    }
+
+    void Return(LogStreamBase* stream) override {
+        delete stream;
+    }
+};
+
+TEST_F(LoggingTest, log_stream_factory) {
+    butil::TempFile temp_file;
+    LoggingSettings settings;
+    settings.logging_dest = LOG_TO_FILE;
+    settings.log_file = temp_file.fname();
+    settings.delete_old = DELETE_OLD_LOG_FILE;
+    InitLogging(settings);
+    SetLogStreamFactory(std::make_shared<UTLogStreamFactory>());
+
+    std::string log = "135792468";
+    int thread_num = 8;
+    pthread_t threads[thread_num];
+    for (int i = 0; i < thread_num; ++i) {
+        ASSERT_EQ(0, pthread_create(&threads[i], NULL, test_async_log, &log));
+    }
+
+    sleep(1);
+
+    g_stopped = true;
+    for (int i = 0; i < thread_num; ++i) {
+        pthread_join(threads[i], NULL);
+    }
+
+    std::ostringstream oss;
+    std::string cmd = butil::string_printf("grep -c %s %s",
+        log.c_str(), temp_file.fname());
+    ASSERT_LE(0, butil::read_command_output(oss, cmd.c_str()));
+    uint64_t log_count = std::strtol(oss.str().c_str(), NULL, 10);
+    ASSERT_EQ(log_count, test_logging_count.load());
+}
+
 struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
     const std::string* log;
     int64_t counter;

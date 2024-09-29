@@ -201,6 +201,7 @@
 // ERROR in normal mode.
 
 namespace logging {
+DECLARE_bool(crash_on_fatal_log);
 
 // TODO(avi): do we want to do a unification of character types here?
 #if defined(OS_WIN)
@@ -300,6 +301,12 @@ BUTIL_EXPORT void SetShowErrorDialogs(bool enable_dialogs);
 typedef void (*LogAssertHandler)(const std::string& str);
 BUTIL_EXPORT void SetLogAssertHandler(LogAssertHandler handler);
 
+class LogStreamFactory;
+// Set the LogStreamFactory that will store and flush the log.
+// Returns previous LogStreamFactory.
+BUTIL_EXPORT std::shared_ptr<LogStreamFactory>
+SetLogStreamFactory(std::shared_ptr<LogStreamFactory> factory);
+
 class LogSink {
 public:
     LogSink() {}
@@ -374,12 +381,35 @@ const LogSeverity BLOG_DFATAL = BLOG_FATAL;
 const LogSeverity BLOG_DFATAL = BLOG_ERROR;
 #endif
 
+// Source location of log message.
+struct SourceLocation {
+    SourceLocation() : SourceLocation(NULL, 0, NULL) {}
+    SourceLocation(const LogChar *filename_in, int line_in, const LogChar *funcname_in)
+        : filename(filename_in), line(line_in), function_name(funcname_in) {}
+
+    const LogChar* filename;
+    int line;
+    const LogChar* function_name;
+};
+
+#define CURRENT_SOURCE_LOCATION ::logging::SourceLocation(__FILE__, __LINE__, __func__)
+
+// Meta of log message.
+struct LogMeta {
+    LogMeta() :LogMeta({"-", 0, "-"}, 0) {}
+    LogMeta(const SourceLocation& sl, LogSeverity severity)
+        : source_location(sl), severity(severity) {}
+
+    SourceLocation source_location;
+    LogSeverity severity;
+};
+
 // A few definitions of macros that don't generate much code. These are used
 // by LOG() and LOG_IF, etc. Since these are used all over our code, it's
 // better to have compact code for these operations.
 #define BAIDU_COMPACT_LOG_EX(severity, ClassName, ...)  \
-    ::logging::ClassName(__FILE__, __LINE__,  __func__, \
-    ::logging::BLOG_##severity, ##__VA_ARGS__)
+    ::logging::ClassName(                               \
+        { CURRENT_SOURCE_LOCATION, ::logging::BLOG_##severity }, ##__VA_ARGS__)
 
 #define BAIDU_COMPACK_LOG(severity)             \
     BAIDU_COMPACT_LOG_EX(severity, LogMessage)
@@ -492,9 +522,9 @@ void print_vlog_sites(VLogSitePrinter*);
 #define LOG_AT_SELECTOR(_1, _2, _3, _4, NAME, ...) NAME
 
 #define LOG_AT_STREAM1(severity, file, line)                                 \
-    ::logging::LogMessage(file, line, ::logging::BLOG_##severity).stream()
+    ::logging::LogMessage({{file, line, ""}, ::logging::BLOG_##severity}).stream()
 #define LOG_AT_STREAM2(severity, file, line, func)                           \
-    ::logging::LogMessage(file, line, func, ::logging::BLOG_##severity).stream()
+    ::logging::LogMessage({{file, line, func }, ::logging::BLOG_##severity}).stream()
 #define LOG_AT_STREAM(...) LOG_AT_SELECTOR(__VA_ARGS__, LOG_AT_STREAM2, LOG_AT_STREAM1)(__VA_ARGS__)
 
 #define LOG_AT1(severity, file, line)                                        \
@@ -506,7 +536,7 @@ void print_vlog_sites(VLogSitePrinter*);
 
 // The VLOG macros log with negative verbosities.
 #define VLOG_STREAM(verbose_level)                                      \
-    ::logging::LogMessage(__FILE__, __LINE__, __func__, -(verbose_level)).stream()
+    ::logging::LogMessage({ CURRENT_SOURCE_LOCATION, -(verbose_level) }).stream()
 
 #define VLOG(verbose_level)                                             \
     BAIDU_LAZY_STREAM(VLOG_STREAM(verbose_level), VLOG_IS_ON(verbose_level))
@@ -534,11 +564,11 @@ void print_vlog_sites(VLogSitePrinter*);
 
 #if defined (OS_WIN)
 #define VPLOG_STREAM(verbose_level)                                     \
-     ::logging::Win32ErrorLogMessage(__FILE__, __LINE__, __func__, -verbose_level, \
+     ::logging::Win32ErrorLogMessage({CURRENT_SOURCE_LOCATION, -verbose_level }, \
                                      ::logging::GetLastSystemErrorCode()).stream()
 #elif defined(OS_POSIX)
 #define VPLOG_STREAM(verbose_level)                                     \
-    ::logging::ErrnoLogMessage(__FILE__, __LINE__, __func__, -verbose_level,      \
+    ::logging::ErrnoLogMessage({CURRENT_SOURCE_LOCATION, -(verbose_level)},      \
                                ::logging::GetLastSystemErrorCode()).stream()
 #endif
 
@@ -605,11 +635,12 @@ void print_vlog_sites(VLogSitePrinter*);
 //
 // TODO(akalin): Rewrite this so that constructs like if (...)
 // CHECK_EQ(...) else { ... } work properly.
-#define BAIDU_CHECK_OP(name, op, val1, val2)                                  \
+#define BAIDU_CHECK_OP(name, op, val1, val2)                            \
     if (std::string* _result =                                          \
         ::logging::Check##name##Impl((val1), (val2),                    \
                                      #val1 " " #op " " #val2))          \
-        ::logging::LogMessage(__FILE__, __LINE__, __func__, _result).stream().SetCheck()
+        ::logging::LogMessage(                                          \
+            {CURRENT_SOURCE_LOCATION, ::logging::BLOG_FATAL}, _result).stream().SetCheck()
 
 #endif
 
@@ -832,14 +863,12 @@ const LogSeverity BLOG_DCHECK = BLOG_INFO;
 // Helper macro for binary operators.
 // Don't use this macro directly in your code, use DCHECK_EQ et al below.
 #define BAIDU_DCHECK_OP(name, op, val1, val2)                           \
-    if (DCHECK_IS_ON())                                                   \
+    if (DCHECK_IS_ON())                                                 \
         if (std::string* _result =                                      \
             ::logging::Check##name##Impl((val1), (val2),                \
                                          #val1 " " #op " " #val2))      \
             ::logging::LogMessage(                                      \
-                __FILE__, __LINE__, __func__,                           \
-                ::logging::BLOG_DCHECK,                                 \
-                _result).stream()
+                {CURRENT_SOURCE_LOCATION, ::logging::BLOG_DCHECK}, _result).stream()
 
 // Equality/Inequality checks - compare two values, and log a
 // BLOG_DCHECK message including the two values when the result is not
@@ -896,64 +925,97 @@ private:
     size_t _size;
 };
 
-// A std::ostream to << objects.
-// Have to use private inheritance to arrange initialization order.
-class LogStream : virtual private CharArrayStreamBuf, public std::ostream {
-friend void DestroyLogStream(LogStream*);
+// Base class for log streams.
+class LogStreamBase : public std::ostream {
 public:
-    LogStream()
-        : std::ostream(this), _file("-"), _line(0), _func("-")
-        , _severity(0) , _noflush(false), _is_check(false) {
-    }
+    LogStreamBase(std::streambuf* streambuf)
+        : std::ostream(streambuf)
+        , _noflush(false), _is_check(false) {}
 
-    ~LogStream() {
-        _noflush = false;
-        Flush();
-    }
+    ~LogStreamBase() override = default;
 
-    inline LogStream& operator<<(LogStream& (*m)(LogStream&)) {
+    // Flush the log stream.
+    virtual void Flush() = 0;
+
+    // Whether the log stream is empty.
+    virtual bool empty() const = 0;
+
+    // Get the content of the log stream.
+    virtual butil::StringPiece content() const = 0;
+    virtual std::string content_str() const = 0;
+
+    inline LogStreamBase& operator<<(LogStreamBase& (*m)(LogStreamBase&)) {
         return m(*this);
     }
 
-    inline LogStream& operator<<(std::ostream& (*m)(std::ostream&)) {
+    inline LogStreamBase& operator<<(std::ostream& (*m)(std::ostream&)) {
         m(*(std::ostream*)this);
         return *this;
     }
 
-    template <typename T> inline LogStream& operator<<(T const& t) {
+    template <typename T>
+    LogStreamBase& operator<<(T const& t) {
         *(std::ostream*)this << t;
         return *this;
     }
 
-    // Reset the log prefix: "I0711 15:14:01.830110 12735 server.cpp:93] "
-    LogStream& SetPosition(const LogChar* file, int line, LogSeverity);
-
     // Reset the log prefix: "E0711 15:14:01.830110 12735 server.cpp:752 StartInternal] "
-    LogStream& SetPosition(const LogChar* file, int line, const LogChar* func, LogSeverity);
+    void SetLogMeta(const LogMeta& log_meta) {
+        _log_meta = log_meta;
+    }
 
     // Make FlushIfNeed() no-op once.
-    LogStream& DontFlushOnce() {
+    LogStreamBase& DontFlushOnce() {
         _noflush = true;
         return *this;
     }
 
-    LogStream& SetCheck() {
+    // Mark the log stream as a check stream.
+    LogStreamBase& SetCheck() {
         _is_check = true;
         return *this;
     }
 
-    bool empty() const { return pbase() == pptr(); }
+    const LogChar* file() const { return _log_meta.source_location.filename; }
+    int line() const { return _log_meta.source_location.line; }
+    const LogChar* func() const { return _log_meta.source_location.function_name; }
+    LogSeverity severity() const { return _log_meta.severity; }
 
-    butil::StringPiece content() const
-    { return butil::StringPiece(pbase(), pptr() - pbase()); }
+protected:
+    LogMeta _log_meta;
+    bool _noflush;
+    bool _is_check;
+};
 
-    std::string content_str() const
-    { return std::string(pbase(), pptr() - pbase()); }
+// Factory to manage log streams.
+class LogStreamFactory {
+public:
+    virtual ~LogStreamFactory() = default;
 
-    const LogChar* file() const { return _file; }
-    int line() const { return _line; }
-    const LogChar* func() const { return _func; }
-    LogSeverity severity() const { return _severity; }
+    virtual LogStreamBase* Get(const LogMeta& log_meta) = 0;
+    virtual void Return(LogStreamBase* log_stream) = 0;
+};
+
+// A std::ostream to << objects.
+// Have to use private inheritance to arrange initialization order.
+class LogStream : virtual private CharArrayStreamBuf, public LogStreamBase {
+public:
+    LogStream() : LogStreamBase(this) {}
+
+    ~LogStream() override {
+        _noflush = false;
+        Flush();
+    }
+
+    bool empty() const override { return pbase() == pptr(); }
+
+    butil::StringPiece content() const override {
+        return butil::StringPiece(pbase(), pptr() - pbase());
+    }
+
+    std::string content_str() const override {
+        return std::string(pbase(), pptr() - pbase());
+    }
 
 private:
     void FlushWithoutReset();
@@ -961,7 +1023,7 @@ private:
     // Flush log into sink(if registered) or stderr.
     // NOTE: make this method private to limit the callsites so that the
     // stack-frame removal in FlushWithoutReset() is always safe.
-    inline void Flush() {
+    void Flush() override {
         const bool res = _noflush;
         _noflush = false;
         if (!res) {
@@ -974,13 +1036,6 @@ private:
             _is_check = false;
         }
     }
-
-    const LogChar* _file;
-    int _line;
-    const LogChar* _func;
-    LogSeverity _severity;
-    bool _noflush;
-    bool _is_check;
 };
 
 // This class more or less represents a particular log message.  You
@@ -995,38 +1050,27 @@ private:
 class BUTIL_EXPORT LogMessage {
 public:
     // Used for LOG(severity).
-    LogMessage(const char* file, int line, LogSeverity severity);
-    LogMessage(const char* file, int line, const char* func,
-               LogSeverity severity);
+    explicit LogMessage(const LogMeta& log_meta);
 
-    // Used for CHECK_EQ(), etc. Takes ownership of the given string.
-    // Implied severity = BLOG_FATAL.
-    LogMessage(const char* file, int line, std::string* result);
-    LogMessage(const char* file, int line, const char* func,
-               std::string* result);
-
-    // Used for DCHECK_EQ(), etc. Takes ownership of the given string.
-    LogMessage(const char* file, int line, LogSeverity severity,
-               std::string* result);
-    LogMessage(const char* file, int line, const char* func,
-               LogSeverity severity, std::string* result);
+    // Used for CHECK_EQ() and DCHECK_EQ(), etc. Takes ownership of the given string.
+    LogMessage(const LogMeta& log_meta, std::string* result);
 
     ~LogMessage();
 
-    LogStream& stream() { return *_stream; }
+    LogStreamBase& stream() { return *_stream; }
 
 private:
     DISALLOW_COPY_AND_ASSIGN(LogMessage);
 
+    std::shared_ptr<LogStreamFactory> _log_stream_factory;
     // The real data is inside LogStream which may be cached thread-locally.
-    LogStream* _stream;
+    LogStreamBase* _stream;
 };
 
 // A non-macro interface to the log facility; (useful
 // when the logging level is not a compile-time constant).
 inline void LogAtLevel(int const log_level, const butil::StringPiece &msg) {
-    LogMessage(__FILE__, __LINE__, __func__,
-               log_level).stream() << msg;
+    LogMessage({ CURRENT_SOURCE_LOCATION, log_level }).stream() << msg;
 }
 
 // This class is used to explicitly ignore values in the conditional
@@ -1044,19 +1088,17 @@ public:
 // Appends a formatted system message of the GetLastError() type.
 class BUTIL_EXPORT Win32ErrorLogMessage {
 public:
-    Win32ErrorLogMessage(const char* file,
-                         int line,
-                         LogSeverity severity,
-                         SystemErrorCode err);
-
-    Win32ErrorLogMessage(const char* file,
-                         int line,
-                         const char* func,
-                         LogSeverity severity,
-                         SystemErrorCode err);
+    Win32ErrorLogMessage(const LogMeta& log_meta, SystemErrorCode err)
+        : log_message_(log_meta), err_(err) {}
 
     // Appends the error message before destructing the encapsulated class.
-    ~Win32ErrorLogMessage();
+    ~Win32ErrorLogMessage() {
+        stream() << ": " << SystemErrorCodeToString(err_);
+        // We're about to crash (CHECK). Put |err_| on the stack (by placing it in a
+        // field) and use Alias in hopes that it makes it into crash dumps.
+        DWORD last_error = err_;
+        butil::debug::Alias(&last_error);
+    }
 
     LogStream& stream() { return log_message_.stream(); }
 
@@ -1070,25 +1112,19 @@ private:
 // Appends a formatted system message of the errno type
 class BUTIL_EXPORT ErrnoLogMessage {
 public:
-    ErrnoLogMessage(const char* file,
-                    int line,
-                    LogSeverity severity,
-                    SystemErrorCode err);
-
-    ErrnoLogMessage(const char* file,
-                    int line,
-                    const char* func,
-                    LogSeverity severity,
-                    SystemErrorCode err);
+    ErrnoLogMessage(const LogMeta& log_meta, SystemErrorCode err)
+        : log_message_(log_meta), err_(err) {}
 
     // Appends the error message before destructing the encapsulated class.
-    ~ErrnoLogMessage();
+    ~ErrnoLogMessage() {
+        stream() << ": " << SystemErrorCodeToString(err_);
+    }
 
-    LogStream& stream() { return log_message_.stream(); }
+    LogStreamBase& stream() { return log_message_.stream(); }
 
 private:
-    SystemErrorCode err_;
     LogMessage log_message_;
+    SystemErrorCode err_;
 
     DISALLOW_COPY_AND_ASSIGN(ErrnoLogMessage);
 };

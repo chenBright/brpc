@@ -102,6 +102,8 @@ typedef pthread_mutex_t* MutexHandle;
 #include "butil/containers/doubly_buffered_data.h"
 #include "butil/memory/singleton.h"
 #include "butil/endpoint.h"
+#include "butil/memory/singleton_on_pthread_once.h"
+#include "butil/class_name.h"
 #ifdef BAIDU_INTERNAL
 #include "butil/comlog_sink.h"
 #endif
@@ -244,6 +246,41 @@ PathString GetDefaultLogFile() {
     // On other platforms we just use the current directory.
     return PathString("debug.log");
 #endif
+}
+
+template <typename T>
+struct DoublyBufferedLogObj : public butil::DoublyBufferedData<T, butil::Void, false, false> {
+    static DoublyBufferedLogObj* GetInstance() {
+        return butil::get_leaky_singleton<DoublyBufferedLogObj>();
+    }
+
+    DoublyBufferedLogObj() = default;
+    DISALLOW_COPY_AND_ASSIGN(DoublyBufferedLogObj);
+};
+
+template <typename T>
+struct DoublyBufferedLogObjFn {
+    T new_obj;
+    T old_obj;
+
+    bool operator()(T& ptr) {
+        old_obj = ptr;
+        ptr = new_obj;
+        return true;
+    }
+};
+
+template <typename T>
+inline T SetLogObj(T obj) {
+    DoublyBufferedLogObjFn<T> fn = { obj, NULL };
+    if (DoublyBufferedLogObj<T>::GetInstance()->Modify(fn) == 0) {
+        butil::debug::StackTrace stack_trace(true);
+        fprintf(stderr, "Fail to modify %s\n%s",
+                butil::class_name<DoublyBufferedLogObjFn<T>>(),
+                stack_trace.ToString().c_str());
+        RELEASE_ASSERT(!::logging::FLAGS_crash_on_fatal_log);
+    }
+    return fn.old_obj;
 }
 
 // This class acts as a wrapper for locking the logging files.
@@ -991,35 +1028,10 @@ void PrintLog(std::ostream& os,
 }
 
 // A log message handler that gets notified of every log message we process.
-class DoublyBufferedLogSink : public butil::DoublyBufferedData<LogSink*> {
-public:
-    DoublyBufferedLogSink() {}
-    static DoublyBufferedLogSink* GetInstance();
-private:
-friend struct DefaultSingletonTraits<DoublyBufferedLogSink>;
-    DISALLOW_COPY_AND_ASSIGN(DoublyBufferedLogSink);
-};
-
-DoublyBufferedLogSink* DoublyBufferedLogSink::GetInstance() {
-    return Singleton<DoublyBufferedLogSink,
-                     LeakySingletonTraits<DoublyBufferedLogSink> >::get();
-}
-
-struct SetLogSinkFn {
-    LogSink* new_sink;
-    LogSink* old_sink;
-
-    bool operator()(LogSink*& ptr) {
-        old_sink = ptr;
-        ptr = new_sink;
-        return true;
-    }
-};
-
+using DoublyBufferedLogSink = DoublyBufferedLogObj<LogSink*>;
+using SetLogSinkFn = DoublyBufferedLogObjFn<LogSink*>;
 LogSink* SetLogSink(LogSink* sink) {
-    SetLogSinkFn fn = { sink, NULL };
-    CHECK(DoublyBufferedLogSink::GetInstance()->Modify(fn));
-    return fn.old_sink;
+    return SetLogObj<LogSink*>(sink);
 }
 
 // MSVC doesn't like complex extern templates and DLLs.
@@ -1143,132 +1155,6 @@ void CharArrayStreamBuf::reset() {
     setp(_data, _data + _size);
 }
 
-LogStream& LogStream::SetPosition(const LogChar* file, int line,
-                                  LogSeverity severity) {
-    _file = file;
-    _line = line;
-    _severity = severity;
-    return *this;
-}
-
-LogStream& LogStream::SetPosition(const LogChar* file, int line,
-                                  const LogChar* func,
-                                  LogSeverity severity) {
-    _file = file;
-    _line = line;
-    _func = func;
-    _severity = severity;
-    return *this;
-}
-
-#if defined(__GNUC__)
-static bthread_key_t stream_bkey;
-static pthread_key_t stream_pkey;
-static pthread_once_t create_stream_key_once = PTHREAD_ONCE_INIT;
-inline bool is_bthread_linked() { return bthread_key_create != NULL; }
-static void destroy_tls_streams(void* data) {
-    if (data == NULL) {
-        return;
-    }
-    LogStream** a = (LogStream**)data;
-    for (int i = 0; i <= LOG_NUM_SEVERITIES; ++i) {
-        delete a[i];
-    }
-    delete[] a;
-}
-static void create_stream_key_or_die() {
-    if (is_bthread_linked()) {
-        int rc = bthread_key_create(&stream_bkey, destroy_tls_streams);
-        if (rc) {
-            fprintf(stderr, "Fail to bthread_key_create");
-            exit(1);
-        }
-    } else {
-        int rc = pthread_key_create(&stream_pkey, destroy_tls_streams);
-        if (rc) {
-            fprintf(stderr, "Fail to pthread_key_create");
-            exit(1);
-        }
-    }
-}
-static LogStream** get_tls_stream_array() {
-    pthread_once(&create_stream_key_once, create_stream_key_or_die);
-    if (is_bthread_linked()) {
-        return (LogStream**)bthread_getspecific(stream_bkey);
-    } else {
-        return (LogStream**)pthread_getspecific(stream_pkey);
-    }
-}
-
-static LogStream** get_or_new_tls_stream_array() {
-    LogStream** a = get_tls_stream_array();
-    if (a == NULL) {
-        a = new LogStream*[LOG_NUM_SEVERITIES + 1];
-        memset(a, 0, sizeof(LogStream*) * (LOG_NUM_SEVERITIES + 1));
-        if (is_bthread_linked()) {
-            bthread_setspecific(stream_bkey, a);
-        } else {
-            pthread_setspecific(stream_pkey, a);
-        }
-    }
-    return a;
-}
-
-inline LogStream* CreateLogStream(const LogChar* file,
-                                  int line,
-                                  const LogChar* func,
-                                  LogSeverity severity) {
-    int slot = 0;
-    if (severity >= 0) {
-        DCHECK_LT(severity, LOG_NUM_SEVERITIES);
-        slot = severity + 1;
-    } // else vlog
-    LogStream** stream_array = get_or_new_tls_stream_array();
-    LogStream* stream = stream_array[slot];
-    if (stream == NULL) {
-        stream = new LogStream;
-        stream_array[slot] = stream;
-    }
-    if (stream->empty()) {
-        stream->SetPosition(file, line, func, severity);
-    }
-    return stream;
-}
-
-inline LogStream* CreateLogStream(const LogChar* file,
-                                  int line,
-                                  LogSeverity severity) {
-    return CreateLogStream(file, line, "", severity);
-}
-
-inline void DestroyLogStream(LogStream* stream) {
-    if (stream != NULL) {
-        stream->Flush();
-    }
-}
-
-#else
-
-inline LogStream* CreateLogStream(const LogChar* file, int line,
-                                  LogSeverity severity) {
-    return CreateLogStream(file, line, "", severity);
-}
-
-
-inline LogStream* CreateLogStream(const LogChar* file, int line,
-                                  const LogChar* func,
-                                  LogSeverity severity) {
-    LogStream* stream = new LogStream;
-    stream->SetPosition(file, line, func, severity);
-    return stream;
-}
-
-inline void DestroyLogStream(LogStream* stream) {
-    delete stream;
-}
-
-#endif  // __GNUC__
-
 class DefaultLogSink : public LogSink {
 public:
     static DefaultLogSink* GetInstance() {
@@ -1334,7 +1220,7 @@ void LogStream::FlushWithoutReset() {
     }
 
 #if !defined(OS_NACL) && !defined(__UCLIBC__)
-    if (FLAGS_print_stack_on_check && _is_check && _severity == BLOG_FATAL) {
+    if (FLAGS_print_stack_on_check && _is_check && _log_meta.severity == BLOG_FATAL) {
         // Include a stack trace on a fatal.
         butil::debug::StackTrace trace;
         size_t count = 0;
@@ -1365,17 +1251,19 @@ void LogStream::FlushWithoutReset() {
     bool tried_comlog = false;
 #endif
     bool tried_default = false;
+    SourceLocation& sl = _log_meta.source_location;
     {
         DoublyBufferedLogSink::ScopedPtr ptr;
         if (DoublyBufferedLogSink::GetInstance()->Read(&ptr) == 0 &&
             (*ptr) != NULL) {
             bool result = false;
             if (FLAGS_log_func_name) {
-                result = (*ptr)->OnLogMessage(_severity, _file, _line,
-                                              _func, content());
+                result = (*ptr)->OnLogMessage(
+                    _log_meta.severity, sl.filename,
+                    sl.line, sl.function_name, content());
             } else {
-                result = (*ptr)->OnLogMessage(_severity, _file,
-                                              _line, content());
+                result = (*ptr)->OnLogMessage(
+                    _log_meta.severity, sl.filename, sl.line, content());
             }
             if (result) {
                 goto FINISH_LOGGING;
@@ -1398,15 +1286,15 @@ void LogStream::FlushWithoutReset() {
     if (!tried_default) {
         if (FLAGS_log_func_name) {
             DefaultLogSink::GetInstance()->OnLogMessage(
-                _severity, _file, _line, _func, content());
+                _log_meta.severity, sl.filename, sl.line, sl.function_name, content());
         } else {
             DefaultLogSink::GetInstance()->OnLogMessage(
-                _severity, _file, _line, content());
+                _log_meta.severity, sl.filename, sl.line, content());
         }
     }
 
 FINISH_LOGGING:
-    if (FLAGS_crash_on_fatal_log && _severity == BLOG_FATAL) {
+    if (FLAGS_crash_on_fatal_log && _log_meta.severity == BLOG_FATAL) {
         // Ensure the first characters of the string are on the stack so they
         // are contained in minidumps for diagnostic purposes.
         butil::StringPiece str = content();
@@ -1432,37 +1320,156 @@ FINISH_LOGGING:
     }
 }
 
-LogMessage::LogMessage(const char* file, int line, LogSeverity severity)
-    : LogMessage(file, line, "", severity) {}
+class DefaultLogStreamFactory : public LogStreamFactory {
+public:
+    LogStreamBase* Get(const LogMeta& log_meta) override;
+    void Return(LogStreamBase* stream) override;
 
-LogMessage::LogMessage(const char* file, int line,
-                       const char* func, LogSeverity severity) {
-    _stream = CreateLogStream(file, line, func, severity);
+private:
+    static bool is_bthread_linked() { return bthread_key_create != NULL; }
+
+    static void destroy_tls_streams(void* data);
+
+    static void create_stream_key_or_die();
+
+    static LogStream** get_tls_stream_array();
+
+    static LogStream** get_or_new_tls_stream_array();
+
+    static bthread_key_t stream_bkey;
+    static pthread_key_t stream_pkey;
+    static pthread_once_t create_stream_key_once;
+};
+
+bthread_key_t DefaultLogStreamFactory::stream_bkey;
+pthread_key_t DefaultLogStreamFactory::stream_pkey;
+pthread_once_t DefaultLogStreamFactory::create_stream_key_once = PTHREAD_ONCE_INIT;
+
+void DefaultLogStreamFactory::destroy_tls_streams(void* data) {
+    if (NULL == data) {
+        return;
+    }
+    auto a = (LogStream**)data;
+    for (int i = 0; i <= LOG_NUM_SEVERITIES; ++i) {
+        delete a[i];
+    }
+    delete[] a;
 }
 
-LogMessage::LogMessage(const char* file, int line, std::string* result)
-    : LogMessage(file, line, "", result) {}
-
-LogMessage::LogMessage(const char* file, int line,
-                       const char* func, std::string* result) {
-    _stream = CreateLogStream(file, line, func, BLOG_FATAL);
-    *_stream << "Check failed: " << *result;
-    delete result;
+void DefaultLogStreamFactory::create_stream_key_or_die() {
+    if (is_bthread_linked()) {
+        int rc = bthread_key_create(&stream_bkey, destroy_tls_streams);
+        if (rc) {
+            fprintf(stderr, "Fail to bthread_key_create");
+            RELEASE_ASSERT(false);
+        }
+    } else {
+        int rc = pthread_key_create(&stream_pkey, destroy_tls_streams);
+        if (rc) {
+            fprintf(stderr, "Fail to pthread_key_create");
+            RELEASE_ASSERT(false);
+        }
+    }
 }
 
-LogMessage::LogMessage(const char* file, int line, LogSeverity severity,
-                       std::string* result)
-   : LogMessage(file, line, "", severity, result) {}
+LogStream** DefaultLogStreamFactory::get_tls_stream_array() {
+    pthread_once(&create_stream_key_once, create_stream_key_or_die);
+    if (is_bthread_linked()) {
+        return (LogStream**)bthread_getspecific(stream_bkey);
+    } else {
+        return (LogStream**)pthread_getspecific(stream_pkey);
+    }
+}
 
-LogMessage::LogMessage(const char* file, int line, const char* func,
-                       LogSeverity severity, std::string* result) {
-    _stream = CreateLogStream(file, line, func, severity);
+LogStream** DefaultLogStreamFactory::get_or_new_tls_stream_array() {
+    LogStream** a = get_tls_stream_array();
+    if (a == NULL) {
+        a = new LogStream*[LOG_NUM_SEVERITIES + 1];
+        memset(a, 0, sizeof(LogStream*) * (LOG_NUM_SEVERITIES + 1));
+        if (is_bthread_linked()) {
+            bthread_setspecific(stream_bkey, a);
+        } else {
+            pthread_setspecific(stream_pkey, a);
+        }
+    }
+    return a;
+}
+
+LogStreamBase* DefaultLogStreamFactory::Get(const LogMeta& log_meta) {
+#if defined(__GNUC__)
+    int slot = 0;
+    int severity = log_meta.severity;
+    if (severity >= 0) {
+        if (severity >= LOG_NUM_SEVERITIES) {
+            butil::debug::StackTrace st(true);
+            fprintf(stderr, "(severity >= LOG_NUM_SEVERITIES) failed:\n %s",
+                    st.ToString().c_str());
+        }
+        slot = severity + 1;
+    } // else vlog
+    LogStream** stream_array = get_or_new_tls_stream_array();
+    LogStream* stream = stream_array[slot];
+    if (stream == NULL) {
+        stream = new LogStream;
+        stream_array[slot] = stream;
+    }
+    if (stream->empty()) {
+        stream->SetLogMeta(log_meta);
+    }
+#else
+    LogStream* stream = new LogStream;
+    stream->SetLogMeta({log_meta);
+#endif // __GNUC__
+    return stream;
+}
+
+void DefaultLogStreamFactory::Return(LogStreamBase* stream) {
+#if defined(__GNUC__)
+    if (NULL != stream) {
+        stream->Flush();
+    }
+    // Destroy log stream when a thread exits.
+#else
+    delete stream;
+#endif
+}
+
+class DefaultLogStreamFactoryWrapper {
+public:
+    DefaultLogStreamFactoryWrapper()
+        : _factory(std::make_shared<DefaultLogStreamFactory>()) {}
+
+    std::shared_ptr<DefaultLogStreamFactory> _factory;
+};
+
+using DoublyBufferedLogStreamFactory = DoublyBufferedLogObj<std::shared_ptr<LogStreamFactory>>;
+using SetLogStreamFactoryFn = DoublyBufferedLogObjFn<std::shared_ptr<LogStreamFactory>>;
+std::shared_ptr<LogStreamFactory> SetLogStreamFactory(std::shared_ptr<LogStreamFactory> factory) {
+    return SetLogObj<std::shared_ptr<LogStreamFactory>>(factory);
+}
+
+std::shared_ptr<LogStreamFactory> get_log_stream_factory() {
+    DoublyBufferedLogStreamFactory::ScopedPtr ptr;
+    if (0 == DoublyBufferedLogStreamFactory::GetInstance()->Read(&ptr) && NULL != (*ptr)) {
+        return *ptr;
+    }
+
+    return butil::get_leaky_singleton<DefaultLogStreamFactoryWrapper>()->_factory;
+}
+
+
+LogMessage::LogMessage(const LogMeta& log_meta)
+    : _log_stream_factory(get_log_stream_factory())
+    , _stream(_log_stream_factory->Get(log_meta)) {}
+
+LogMessage::LogMessage(const LogMeta& log_meta, std::string* result)
+    : LogMessage(log_meta) {
     *_stream << "Check failed: " << *result;
     delete result;
 }
 
 LogMessage::~LogMessage() {
-    DestroyLogStream(_stream);
+    _log_stream_factory->Return(_stream);
 }
 
 #if defined(OS_WIN)
@@ -1514,51 +1521,6 @@ BUTIL_EXPORT std::string SystemErrorCodeToString(SystemErrorCode error_code) {
 #else
 #error Not implemented
 #endif
-
-
-#if defined(OS_WIN)
-Win32ErrorLogMessage::Win32ErrorLogMessage(const char* file,
-                                           int line,
-                                           LogSeverity severity,
-                                           SystemErrorCode err)
-   : Win32ErrorLogMessage(file, line, "", severity, err) {
-}
-
-Win32ErrorLogMessage::Win32ErrorLogMessage(const char* file,
-                                           int line,
-                                           const char* func,
-                                           LogSeverity severity,
-                                           SystemErrorCode err)
-    : err_(err)
-    , log_message_(file, line, func, severity) {
-}
-
-Win32ErrorLogMessage::~Win32ErrorLogMessage() {
-    stream() << ": " << SystemErrorCodeToString(err_);
-    // We're about to crash (CHECK). Put |err_| on the stack (by placing it in a
-    // field) and use Alias in hopes that it makes it into crash dumps.
-    DWORD last_error = err_;
-    butil::debug::Alias(&last_error);
-}
-#elif defined(OS_POSIX)
-ErrnoLogMessage::ErrnoLogMessage(const char* file,
-                                 int line,
-                                 LogSeverity severity,
-                                 SystemErrorCode err)
-    : ErrnoLogMessage(file, line, "", severity, err) {}
-
-ErrnoLogMessage::ErrnoLogMessage(const char* file,
-                                 int line,
-                                 const char* func,
-                                 LogSeverity severity,
-                                 SystemErrorCode err)
-    : err_(err)
-    , log_message_(file, line, func, severity) {}
-
-ErrnoLogMessage::~ErrnoLogMessage() {
-    stream() << ": " << SystemErrorCodeToString(err_);
-}
-#endif  // OS_WIN
 
 void CloseLogFile() {
     LoggingLock logging_lock;
