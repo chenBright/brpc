@@ -617,7 +617,7 @@ template<typename T>
 std::string VersionedRefWithId<T>::description() const {
     std::string result;
     result.reserve(128);
-    butil::string_appendf(&result, "Socket{id=%" PRIu64, id());
+    butil::string_appendf(&result, "Socket{id=%" PRIu64 " ", id());
     result.append(WRAPPER_CALL(
         OnDescription, const_cast<T*>(static_cast<const T*>(this))));
     butil::string_appendf(&result, "} (0x%p)", this);

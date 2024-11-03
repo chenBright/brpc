@@ -22,7 +22,7 @@
 #include "butil/synchronization/condition_variable.h"
 #include "butil/containers/flat_map.h"
 #include "brpc/input_messenger.h"
-
+#include "brpc/ssl_context_factory.h"
 
 namespace brpc {
 
@@ -55,7 +55,7 @@ public:
     // `idle_timeout_sec' > 0
     // Return 0 on success, -1 otherwise.
     int StartAccept(int listened_fd, int idle_timeout_sec,
-                    const std::shared_ptr<SocketSSLContext>& ssl_ctx,
+                    const std::shared_ptr<SSLContextFactory>& ssl_context_factory,
                     bool force_ssl);
 
     // [thread-safe] Stop accepting connections.
@@ -108,7 +108,7 @@ private:
     SocketMap _socket_map;
 
     bool _force_ssl;
-    std::shared_ptr<SocketSSLContext> _ssl_ctx;
+    std::shared_ptr<SSLContextFactory> _ssl_context_factory;
 
     // Whether to use rdma or not
     bool _use_rdma;

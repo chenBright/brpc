@@ -36,6 +36,7 @@
 #include "brpc/retry_policy.h"
 #include "brpc/backup_request_policy.h"
 #include "brpc/naming_service_filter.h"
+#include "brpc/ssl_context_factory.h"
 
 namespace brpc {
 
@@ -98,6 +99,8 @@ struct ChannelOptions {
     // Print a log when above situation happens.
     // Default: true.
     bool log_succeed_without_server;
+
+    std::shared_ptr<SSLContextFactory> ssl_context_factory;
 
     // SSL related options. Refer to `ChannelSSLOptions' for details
     bool has_ssl_options() const { return _ssl_options != NULL; }
@@ -228,7 +231,10 @@ protected:
     // therefore destroy the `controller' inside `done'
     static void CallMethodImpl(Controller* controller, SharedLoadBalancer* lb);
 
-    int InitChannelOptions(const ChannelOptions* options);
+    // todo 不需要默认参数？
+    int InitChannelOptions(const ChannelOptions* options,
+                           const char* ns_or_server_url = NULL,
+                           int raw_port = -1);
     int InitSingle(const butil::EndPoint& server_addr_and_port,
                    const char* raw_server_address,
                    const ChannelOptions* options,

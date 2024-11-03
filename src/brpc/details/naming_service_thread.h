@@ -51,7 +51,7 @@ struct GetNamingServiceThreadOptions {
     bool log_succeed_without_server;
     bool use_rdma;
     ChannelSignature channel_signature;
-    std::shared_ptr<SocketSSLContext> ssl_ctx;
+    std::shared_ptr<SSLContextFactory> ssl_context_factory;
 };
 
 // A dedicated thread to map a name to ServerIds

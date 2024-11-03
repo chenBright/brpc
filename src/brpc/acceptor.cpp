@@ -39,7 +39,6 @@ Acceptor::Acceptor(bthread_keytable_pool_t* pool)
     , _acception_id(0)
     , _empty_cond(&_map_mutex)
     , _force_ssl(false)
-    , _ssl_ctx(NULL) 
     , _use_rdma(false)
     , _bthread_tag(BTHREAD_TAG_DEFAULT) {
 }
@@ -50,14 +49,14 @@ Acceptor::~Acceptor() {
 }
 
 int Acceptor::StartAccept(int listened_fd, int idle_timeout_sec,
-                          const std::shared_ptr<SocketSSLContext>& ssl_ctx,
+                          const std::shared_ptr<SSLContextFactory>& ssl_context_factory,
                           bool force_ssl) {
     if (listened_fd < 0) {
         LOG(FATAL) << "Invalid listened_fd=" << listened_fd;
         return -1;
     }
 
-    if (!ssl_ctx && force_ssl) {
+    if (NULL == ssl_context_factory && force_ssl) {
         LOG(ERROR) << "Fail to force SSL for all connections "
                       " because ssl_ctx is NULL";
         return -1;
@@ -85,7 +84,7 @@ int Acceptor::StartAccept(int listened_fd, int idle_timeout_sec,
     }
     _idle_timeout_sec = idle_timeout_sec;
     _force_ssl = force_ssl;
-    _ssl_ctx = ssl_ctx;
+    _ssl_context_factory = ssl_context_factory;
     
     // Creation of _acception_id is inside lock so that OnNewConnections
     // (which may run immediately) should see sane fields set below.
@@ -282,7 +281,7 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
         butil::sockaddr2endpoint(&in_addr, in_len, &options.remote_side);
         options.user = acception->user();
         options.force_ssl = am->_force_ssl;
-        options.initial_ssl_ctx = am->_ssl_ctx;
+        options.ssl_context_factory = am->_ssl_context_factory;
 #if BRPC_WITH_RDMA
         if (am->_use_rdma) {
             options.on_edge_triggered_events = rdma::RdmaEndpoint::OnNewDataFromTcp;

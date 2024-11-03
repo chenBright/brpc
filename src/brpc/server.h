@@ -45,6 +45,7 @@
 #include "brpc/concurrency_limiter.h"
 #include "brpc/baidu_master_service.h"
 #include "brpc/rpc_pb_message_factory.h"
+#include "brpc/ssl_context_factory.h"
 
 namespace brpc {
 
@@ -215,14 +216,6 @@ struct ServerOptions {
     // Enable more secured code which protects internal information from exposure.
     bool security_mode() const { return internal_port >= 0 || !has_builtin_services; }
 
-    // SSL related options. Refer to `ServerSSLOptions' for details
-    bool has_ssl_options() const { return _ssl_options != NULL; }
-    const ServerSSLOptions& ssl_options() const { return *_ssl_options; }
-    ServerSSLOptions* mutable_ssl_options();
-
-    // Force ssl for all connections of the port to Start().
-    bool force_ssl;
-
     // Whether the server uses rdma or not
     // Default: false
     bool use_rdma;
@@ -291,6 +284,16 @@ struct ServerOptions {
     // server will keep processing this request, it is expected to be used by some light-weight control-frame rpcs.
     // [CUATION] You should not enabling this option if your rpc is heavy-loaded.
     bool ignore_eovercrowded;
+
+    // SSL related options. Refer to `ServerSSLOptions' for details
+    bool has_ssl_options() const { return _ssl_options != NULL; }
+    const ServerSSLOptions& ssl_options() const { return *_ssl_options; }
+    ServerSSLOptions* mutable_ssl_options();
+
+    std::shared_ptr<SSLContextFactory> ssl_context_factory;
+
+    // Force ssl for all connections of the port to Start().
+    bool force_ssl;
 
 private:
     // SSLOptions is large and not often used, allocate it on heap to

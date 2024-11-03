@@ -65,8 +65,8 @@ public:
         brpc::ClosureGuard done_guard(done);
         brpc::Controller* cntl = (brpc::Controller*)cntl_base;
         count.fetch_add(1, butil::memory_order_relaxed);
-        EXPECT_EQ(EXP_REQUEST, request->message());
-        EXPECT_TRUE(cntl->is_ssl());
+        ASSERT_EQ(EXP_REQUEST, request->message());
+        ASSERT_TRUE(cntl->is_ssl());
 
         response->set_message(EXP_RESPONSE);
         if (request->sleep_us() > 0) {
@@ -287,7 +287,8 @@ TEST_F(SSLTest, connect_on_create) {
     std::shared_ptr<brpc::SocketSSLContext> ssl_ctx
         = std::make_shared<brpc::SocketSSLContext>();
     ssl_ctx->raw_ctx = raw_ctx;
-    socket_options.initial_ssl_ctx = ssl_ctx;
+    socket_options.ssl_context_factory =
+        std::make_shared<brpc::DefaultSSLContextFactory>(ssl_ctx, false);
 
     brpc::SocketId socket_id;
     ASSERT_EQ(0, brpc::Socket::Create(socket_options, &socket_id));

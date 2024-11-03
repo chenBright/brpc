@@ -80,16 +80,16 @@ struct SocketMapKeyHasher {
 // successfully, SocketMapRemove() MUST be called when the Socket is not needed.
 // Return 0 on success, -1 otherwise.
 int SocketMapInsert(const SocketMapKey& key, SocketId* id,
-                    const std::shared_ptr<SocketSSLContext>& ssl_ctx,
+                    const std::shared_ptr<SSLContextFactory>& ssl_context_factory,
                     bool use_rdma);
 
 inline int SocketMapInsert(const SocketMapKey& key, SocketId* id,
-                    const std::shared_ptr<SocketSSLContext>& ssl_ctx) {
-    return SocketMapInsert(key, id, ssl_ctx, false);
+                           const std::shared_ptr<SSLContextFactory>& ssl_context_factory) {
+    return SocketMapInsert(key, id, ssl_context_factory, false);
 }
 
 inline int SocketMapInsert(const SocketMapKey& key, SocketId* id) {
-    std::shared_ptr<SocketSSLContext> empty_ptr;
+    std::shared_ptr<SSLContextFactory> empty_ptr;
     return SocketMapInsert(key, id, empty_ptr, false);
 }
 
@@ -150,14 +150,14 @@ public:
     ~SocketMap();
     int Init(const SocketMapOptions&);
     int Insert(const SocketMapKey& key, SocketId* id,
-               const std::shared_ptr<SocketSSLContext>& ssl_ctx,
+               const std::shared_ptr<SSLContextFactory>& ssl_context_factory,
                bool use_rdma);
     int Insert(const SocketMapKey& key, SocketId* id,
-               const std::shared_ptr<SocketSSLContext>& ssl_ctx) {
-        return Insert(key, id, ssl_ctx, false);   
+               const std::shared_ptr<SSLContextFactory>& ssl_content_factory) {
+        return Insert(key, id, ssl_content_factory, false);
     }
     int Insert(const SocketMapKey& key, SocketId* id) {
-        std::shared_ptr<SocketSSLContext> empty_ptr;
+        std::shared_ptr<SSLContextFactory> empty_ptr;
         return Insert(key, id, empty_ptr, false);
     }
 

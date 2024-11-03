@@ -90,9 +90,10 @@ SocketMap* get_or_new_client_side_socket_map() {
 }
 
 int SocketMapInsert(const SocketMapKey& key, SocketId* id,
-                    const std::shared_ptr<SocketSSLContext>& ssl_ctx,
+                    const std::shared_ptr<SSLContextFactory>& ssl_context_factory,
                     bool use_rdma) {
-    return get_or_new_client_side_socket_map()->Insert(key, id, ssl_ctx, use_rdma);
+    return get_or_new_client_side_socket_map()->Insert(
+        key, id, ssl_context_factory, use_rdma);
 }    
 
 int SocketMapFind(const SocketMapKey& key, SocketId* id) {
@@ -224,7 +225,7 @@ void SocketMap::ShowSocketMapInBvarIfNeed() {
 }
 
 int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
-                      const std::shared_ptr<SocketSSLContext>& ssl_ctx,
+                      const std::shared_ptr<SSLContextFactory>& ssl_context_factory,
                       bool use_rdma) {
     ShowSocketMapInBvarIfNeed();
 
@@ -247,7 +248,7 @@ int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
     SocketId tmp_id;
     SocketOptions opt;
     opt.remote_side = key.peer.addr;
-    opt.initial_ssl_ctx = ssl_ctx;
+    opt.ssl_context_factory = ssl_context_factory;
     opt.use_rdma = use_rdma;
     if (_options.socket_creator->CreateSocket(opt, &tmp_id) != 0) {
         PLOG(FATAL) << "Fail to create socket to " << key.peer;

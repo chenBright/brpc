@@ -80,8 +80,6 @@ DEFINE_int32(socket_recv_buffer_size, -1,
 DEFINE_int32(socket_send_buffer_size, -1, 
             "Set send buffer size of sockets if this value is positive");
 
-DEFINE_int32(ssl_bio_buffer_size, 16*1024, "Set buffer size for SSL read/write");
-
 DEFINE_int64(socket_max_unwritten_bytes, 64 * 1024 * 1024,
              "Max unwritten bytes in each socket, if the limit is reached,"
              " Socket.Write fails with EOVERCROWDED");
@@ -753,9 +751,9 @@ int Socket::OnCreated(const SocketOptions& options) {
     }
     _force_ssl = options.force_ssl;
     // Disable SSL check if there is no SSL context
-    _ssl_state = (options.initial_ssl_ctx == NULL ? SSL_OFF : SSL_UNKNOWN);
+    _ssl_state = (NULL == options.ssl_context_factory ? SSL_OFF : SSL_UNKNOWN);
     _ssl_session = NULL;
-    _ssl_ctx = options.initial_ssl_ctx;
+    _ssl_context_factory = options.ssl_context_factory;
 #if BRPC_WITH_RDMA
     CHECK(_rdma_ep == NULL);
     if (options.use_rdma) {
@@ -877,11 +875,9 @@ void Socket::BeforeRecycled() {
     bthread_id_list_destroy(&_id_wait_list);
 
     if (_ssl_session) {
-        SSL_free(_ssl_session);
+        _ssl_context_factory->Shutdown(_ssl_session);
         _ssl_session = NULL;
     }
-
-    _ssl_ctx = NULL;
 
     delete _pipeline_q;
     _pipeline_q = NULL;
@@ -1040,7 +1036,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
 
     _local_side = butil::EndPoint();
     if (_ssl_session) {
-        SSL_free(_ssl_session);
+        _ssl_context_factory->Shutdown(_ssl_session);
         _ssl_session = NULL;
     }        
     _ssl_state = SSL_UNKNOWN;
@@ -1287,7 +1283,7 @@ int Socket::WaitEpollOut(int fd, bool pollin, const timespec* abstime) {
 
 int Socket::Connect(const timespec* abstime,
                     int (*on_connect)(int, int, void*), void* data) {
-    if (_ssl_ctx) {
+    if (NULL != _ssl_context_factory) {
         _ssl_state = SSL_CONNECTING;
     } else {
         _ssl_state = SSL_OFF;
@@ -1998,108 +1994,27 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
 }
 
 int Socket::SSLHandshake(int fd, bool server_mode) {
-    if (_ssl_ctx == NULL) {
+    if (NULL == _ssl_context_factory) {
         if (server_mode) {
             LOG(ERROR) << "Lack SSL configuration to handle SSL request";
             return -1;
         }
         return 0;
     }
-
-    // TODO: Reuse ssl session id for client
-    if (_ssl_session) {
-        // Free the last session, which may be deprecated when socket failed
-        SSL_free(_ssl_session);
-    }
-    _ssl_session = CreateSSLSession(_ssl_ctx->raw_ctx, id(), fd, server_mode);
-    if (_ssl_session == NULL) {
-        LOG(ERROR) << "Fail to CreateSSLSession";
-        return -1;
-    }
-#if defined(SSL_CTRL_SET_TLSEXT_HOSTNAME) || defined(USE_MESALINK)
-    if (!_ssl_ctx->sni_name.empty()) {
-        SSL_set_tlsext_host_name(_ssl_session, _ssl_ctx->sni_name.c_str());
-    }
-#endif
-
     _ssl_state = SSL_CONNECTING;
 
-    // Loop until SSL handshake has completed. For SSL_ERROR_WANT_READ/WRITE,
-    // we use bthread_fd_wait as polling mechanism instead of EventDispatcher
-    // as it may confuse the origin event processing code.
-    while (true) {
-        ERR_clear_error();
-        int rc = SSL_do_handshake(_ssl_session);
-        if (rc == 1) {
-            // In client, check if server returned ALPN selection is acceptable.
-            if (!server_mode && !_ssl_ctx->alpn_protocols.empty()) {
-                const unsigned char *alpn_proto;
-                unsigned int alpn_proto_length;
-                SSL_get0_alpn_selected(_ssl_session, &alpn_proto, &alpn_proto_length);
-                if (!alpn_proto) {
-                    LOG(ERROR) << "Server returned no ALPN protocol";
-                    return -1;
-                }
+    // TODO: Reuse ssl session id for client
 
-                std::string alpn_protocol(
-                    reinterpret_cast<char const *>(alpn_proto),
-                    alpn_proto_length
-                );
-                if (
-                    std::find(
-                        _ssl_ctx->alpn_protocols.begin(),
-                        _ssl_ctx->alpn_protocols.end(),
-                        alpn_protocol
-                    ) == _ssl_ctx->alpn_protocols.end()
-                ) {
-                    LOG(ERROR) << "Server returned unacceptable ALPN protocol: "
-                               << alpn_protocol;
-                    return -1;
-                }
-            }
-
-            _ssl_state = SSL_CONNECTED;
-            AddBIOBuffer(_ssl_session, fd, FLAGS_ssl_bio_buffer_size);
-            return 0;
-        }
-
-        int ssl_error = SSL_get_error(_ssl_session, rc);
-        switch (ssl_error) {
-        case SSL_ERROR_WANT_READ:
-#if defined(OS_LINUX)
-            if (bthread_fd_wait(fd, EPOLLIN) != 0) {
-#elif defined(OS_MACOSX)
-            if (bthread_fd_wait(fd, EVFILT_READ) != 0) {
-#endif
-                return -1;
-            }
-            break;
-
-        case SSL_ERROR_WANT_WRITE:
-#if defined(OS_LINUX)
-            if (bthread_fd_wait(fd, EPOLLOUT) != 0) {
-#elif defined(OS_MACOSX)
-            if (bthread_fd_wait(fd, EVFILT_WRITE) != 0) {
-#endif
-                return -1;
-            }
-            break;
- 
-        default: {
-            const unsigned long e = ERR_get_error();
-            if (ssl_error == SSL_ERROR_ZERO_RETURN || e == 0) {
-                errno = ECONNRESET;
-                LOG(ERROR) << "SSL connection was shutdown by peer: " << _remote_side;
-            } else if (ssl_error == SSL_ERROR_SYSCALL) {
-                PLOG(ERROR) << "Fail to SSL_do_handshake";
-            } else {
-                errno = ESSL;
-                LOG(ERROR) << "Fail to SSL_do_handshake: " << SSLError(e);
-            }
-            return -1;
-        }
-        }
+    SocketUniquePtr ptr;
+    ReAddress(&ptr);
+    _ssl_session = _ssl_context_factory->SSLHandshake(ptr, fd);
+    if (NULL == _ssl_session) {
+        _ssl_state = SSL_UNKNOWN;
+        LOG(ERROR) << "Fail to do SSL handshake for " << *this;
+        return -1;
     }
+    _ssl_state = SSL_CONNECTED;
+    return 0;
 }
 
 ssize_t Socket::DoRead(size_t size_hint) {
@@ -2130,7 +2045,7 @@ ssize_t Socket::DoRead(size_t size_hint) {
             break;
         }
     }
-    // _ssl_state has been set
+    // _ssl_state has been set.
     if (ssl_state() == SSL_OFF) {
         if (_force_ssl) {
             errno = ESSL;
@@ -2447,13 +2362,14 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
     os << "\ncid=" << ptr->_correlation_id
        << "\nwrite_head=" << ptr->_write_head.load(butil::memory_order_relaxed)
        << "\nssl_state=" << SSLStateToString(ssl_state);
-    const SocketSSLContext* ssl_ctx = ptr->_ssl_ctx.get();
-    if (ssl_ctx) {
-        os << "\ninitial_ssl_ctx=" << ssl_ctx->raw_ctx;
-        if (!ssl_ctx->sni_name.empty()) {
-            os << "\nsni_name=" << ssl_ctx->sni_name;
-        }
-    }
+    // todo 加个description接口？
+    // const SocketSSLContext* ssl_ctx = ptr->_ssl_ctx.get();
+    // if (ssl_ctx) {
+    //     os << "\ninitial_ssl_ctx=" << ssl_ctx->raw_ctx;
+    //     if (!ssl_ctx->sni_name.empty()) {
+    //         os << "\nsni_name=" << ssl_ctx->sni_name;
+    //     }
+    // }
     if (ssl_state == SSL_CONNECTED) {
         os << "\nssl_session={\n  ";
         Print(os, ptr->_ssl_session, "\n  ");
@@ -2804,7 +2720,7 @@ int Socket::GetPooledSocket(SocketUniquePtr* pooled_socket) {
         opt.remote_side = remote_side();
         opt.user = user();
         opt.on_edge_triggered_events = _on_edge_triggered_events;
-        opt.initial_ssl_ctx = _ssl_ctx;
+        opt.ssl_context_factory = _ssl_context_factory;
         opt.keytable_pool = _keytable_pool;
         opt.app_connect = _app_connect;
         opt.use_rdma =  (_rdma_ep) ? true : false;
@@ -2905,7 +2821,7 @@ int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
     opt.remote_side = remote_side();
     opt.user = user();
     opt.on_edge_triggered_events = _on_edge_triggered_events;
-    opt.initial_ssl_ctx = _ssl_ctx;
+    opt.ssl_context_factory = _ssl_context_factory;
     opt.keytable_pool = _keytable_pool;
     opt.app_connect = _app_connect;
     opt.use_rdma =  (_rdma_ep) ? true : false;
@@ -3010,16 +2926,6 @@ void Socket::OnProgressiveReadCompleted() {
         } else if (_connection_type_for_progressive_read == CONNECTION_TYPE_SHORT) {
             SetFailed(EUNUSED, "[%s]Close short connection", __FUNCTION__);
         }
-    }
-}
-
-SocketSSLContext::SocketSSLContext()
-    : raw_ctx(NULL)
-{}
-
-SocketSSLContext::~SocketSSLContext() {
-    if (raw_ctx) {
-        SSL_CTX_free(raw_ctx);
     }
 }
 

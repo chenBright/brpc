@@ -41,6 +41,7 @@
 #include "brpc/http_method.h"
 #include "brpc/event_dispatcher.h"
 #include "brpc/versioned_ref_with_id.h"
+#include "brpc/ssl_context_factory.h"
 
 namespace brpc {
 namespace policy {
@@ -223,16 +224,6 @@ private:
     uint64_t _data;
 };
 
-
-struct SocketSSLContext {
-    SocketSSLContext();
-    ~SocketSSLContext();
-
-    SSL_CTX* raw_ctx;                        // owned
-    std::string sni_name;                    // useful for clients
-    std::vector<std::string> alpn_protocols; // useful for clients
-};
-
 struct SocketKeepaliveOptions {
     // Start keeplives after this period.
     int keepalive_idle_s{-1};
@@ -268,7 +259,7 @@ struct SocketOptions {
     int health_check_interval_s{-1};
     // Only accept ssl connection.
     bool force_ssl{false};
-    std::shared_ptr<SocketSSLContext> initial_ssl_ctx;
+    std::shared_ptr<SSLContextFactory> ssl_context_factory;
     bool use_rdma{false};
     bthread_keytable_pool_t* keytable_pool{NULL};
     SocketConnection* conn{NULL};
@@ -679,7 +670,7 @@ private:
     // Create SSL session inside and block (in bthread) until handshake
     // has completed. Application layer I/O is forbidden during this
     // process to avoid concurrent I/O on the underlying fd
-    // Returns 0 on success, -1 otherwise
+    // Returns 0 on success, -1 otherwise.
     int SSLHandshake(int fd, bool server_mode);
 
     // Based upon whether the underlying channel is using SSL (if
@@ -905,6 +896,7 @@ private:
     // exists in server side
     AuthContext* _auth_context;
 
+    std::shared_ptr<SSLContextFactory> _ssl_context_factory;
     // Only accept ssl connection.
     bool _force_ssl;
     SSLState _ssl_state;
@@ -912,7 +904,6 @@ private:
     // Use mutex to protect SSL objects when ssl_state is SSL_CONNECTED.
     mutable butil::Mutex _ssl_session_mutex;
     SSL* _ssl_session;               // owner
-    std::shared_ptr<SocketSSLContext> _ssl_ctx;
 
     // The RdmaEndpoint
     rdma::RdmaEndpoint* _rdma_ep;

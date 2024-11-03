@@ -111,15 +111,20 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
         }
         butil::MurmurHash3_x64_128_Update(&mm_ctx, buf.data(), buf.size());
         buf.clear();
-    
-        if (opt.has_ssl_options()) {
-            const CertInfo& cert = opt.ssl_options().client_cert;
-            if (!cert.certificate.empty()) {
-                // Certificate may be too long (PEM string) to fit into `buf'
-                butil::MurmurHash3_x64_128_Update(
-                    &mm_ctx, cert.certificate.data(), cert.certificate.size());
-                butil::MurmurHash3_x64_128_Update(
-                    &mm_ctx, cert.private_key.data(), cert.private_key.size());
+
+        if (NULL != opt.ssl_context_factory) {
+            buf.append("|sslcf=");
+            buf.append((char*)&opt.ssl_context_factory, sizeof(opt.ssl_context_factory));
+        } else {
+            if (opt.has_ssl_options()) {
+                const CertInfo& cert = opt.ssl_options().client_cert;
+                if (!cert.certificate.empty()) {
+                    // Certificate may be too long (PEM string) to fit into `buf'
+                    butil::MurmurHash3_x64_128_Update(
+                        &mm_ctx, cert.certificate.data(), cert.certificate.size());
+                    butil::MurmurHash3_x64_128_Update(
+                        &mm_ctx, cert.private_key.data(), cert.private_key.size());
+                }
             }
         }
         // sni_filters has no effect in ChannelSSLOptions
@@ -164,7 +169,27 @@ static bool OptionsAvailableForRdma(const ChannelOptions* opt) {
 }
 #endif
 
-int Channel::InitChannelOptions(const ChannelOptions* options) {
+static int CreateSocketSSLContext(const ChannelOptions& options,
+    std::shared_ptr<SocketSSLContext>* ssl_ctx) {
+    if (options.has_ssl_options()) {
+        SSL_CTX* raw_ctx = CreateClientSSLContext(options.ssl_options());
+        if (!raw_ctx) {
+            LOG(ERROR) << "Fail to CreateClientSSLContext";
+            return -1;
+        }
+        *ssl_ctx = std::make_shared<SocketSSLContext>();
+        (*ssl_ctx)->raw_ctx = raw_ctx;
+        (*ssl_ctx)->sni_name = options.ssl_options().sni_name;
+        (*ssl_ctx)->alpn_protocols = options.ssl_options().alpn_protocols;
+    } else {
+        (*ssl_ctx) = NULL;
+    }
+    return 0;
+}
+
+int Channel::InitChannelOptions(const ChannelOptions* options,
+                                const char* ns_or_server_url,
+                                int raw_port) {
     if (options) {  // Override default options if user provided one.
         _options = *options;
     }
@@ -234,6 +259,31 @@ int Channel::InitChannelOptions(const ChannelOptions* options) {
     if (!cg.empty() && (::isspace(cg.front()) || ::isspace(cg.back()))) {
         butil::TrimWhitespace(cg, butil::TRIM_ALL, &cg);
     }
+
+    if (NULL != ns_or_server_url) {
+        int* port_out = raw_port == -1 ? &raw_port: NULL;
+        ParseURL(ns_or_server_url, &_scheme, &_service_name, port_out);
+        if (raw_port != -1) {
+            _service_name.append(":").append(std::to_string(raw_port));
+        }
+        if (_options.protocol == brpc::PROTOCOL_HTTP && _scheme == "https") {
+            if (_options.mutable_ssl_options()->sni_name.empty()) {
+                _options.mutable_ssl_options()->sni_name = _service_name;
+            }
+        }
+
+        if (NULL == _options.ssl_context_factory) {
+            std::shared_ptr<SocketSSLContext> ssl_ctx;
+            if (CreateSocketSSLContext(_options, &ssl_ctx) != 0) {
+                return -1;
+            }
+            if (NULL != ssl_ctx) {
+                _options.ssl_context_factory =
+                    std::make_shared<DefaultSSLContextFactory>(ssl_ctx, false);
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -296,24 +346,6 @@ int Channel::Init(const char* server_addr, int port,
     return InitSingle(point, server_addr, options, port);
 }
 
-static int CreateSocketSSLContext(const ChannelOptions& options,
-                                  std::shared_ptr<SocketSSLContext>* ssl_ctx) {
-    if (options.has_ssl_options()) {
-        SSL_CTX* raw_ctx = CreateClientSSLContext(options.ssl_options());
-        if (!raw_ctx) {
-            LOG(ERROR) << "Fail to CreateClientSSLContext";
-            return -1;
-        }
-        *ssl_ctx = std::make_shared<SocketSSLContext>();
-        (*ssl_ctx)->raw_ctx = raw_ctx;
-        (*ssl_ctx)->sni_name = options.ssl_options().sni_name;
-        (*ssl_ctx)->alpn_protocols = options.ssl_options().alpn_protocols;
-    } else {
-        (*ssl_ctx) = NULL;
-    }
-    return 0;
-}
-
 int Channel::Init(butil::EndPoint server_addr_and_port,
                   const ChannelOptions* options) {
     return InitSingle(server_addr_and_port, "", options);
@@ -324,7 +356,7 @@ int Channel::InitSingle(const butil::EndPoint& server_addr_and_port,
                         const ChannelOptions* options,
                         int raw_port) {
     GlobalInitializeOrDie();
-    if (InitChannelOptions(options) != 0) {
+    if (InitChannelOptions(options, raw_server_address, raw_port) != 0) {
         return -1;
     }
     int* port_out = raw_port == -1 ? &raw_port: NULL;
@@ -344,12 +376,9 @@ int Channel::InitSingle(const butil::EndPoint& server_addr_and_port,
     }
     _server_address = server_addr_and_port;
     const ChannelSignature sig = ComputeChannelSignature(_options);
-    std::shared_ptr<SocketSSLContext> ssl_ctx;
-    if (CreateSocketSSLContext(_options, &ssl_ctx) != 0) {
-        return -1;
-    }
     if (SocketMapInsert(SocketMapKey(server_addr_and_port, sig),
-                        &_server_id, ssl_ctx, _options.use_rdma) != 0) {
+                        &_server_id, _options.ssl_context_factory,
+                        _options.use_rdma) != 0) {
         LOG(ERROR) << "Fail to insert into SocketMap";
         return -1;
     }
@@ -364,21 +393,22 @@ int Channel::Init(const char* ns_url,
         return Init(ns_url, options);
     }
     GlobalInitializeOrDie();
-    if (InitChannelOptions(options) != 0) {
+    if (InitChannelOptions(options, ns_url) != 0) {
         return -1;
     }
-    int raw_port = -1;
-    ParseURL(ns_url, &_scheme, &_service_name, &raw_port);
-    if (raw_port != -1) {
-        _service_name.append(":").append(std::to_string(raw_port));
-    }
-    if (_options.protocol == brpc::PROTOCOL_HTTP && _scheme == "https") {
-        if (_options.mutable_ssl_options()->sni_name.empty()) {
-            _options.mutable_ssl_options()->sni_name = _service_name;
-        }
-    }
-    std::unique_ptr<LoadBalancerWithNaming> lb(new (std::nothrow)
-                                                   LoadBalancerWithNaming);
+    // todo 放到InitChannelOptions里
+    // int raw_port = -1;
+    // ParseURL(ns_url, &_scheme, &_service_name, &raw_port);
+    // if (raw_port != -1) {
+    //     _service_name.append(":").append(std::to_string(raw_port));
+    // }
+    // if (_options.protocol == brpc::PROTOCOL_HTTP && _scheme == "https") {
+    //     if (_options.mutable_ssl_options()->sni_name.empty()) {
+    //         _options.mutable_ssl_options()->sni_name = _service_name;
+    //     }
+    // }
+    std::unique_ptr<LoadBalancerWithNaming> lb(
+        new (std::nothrow) LoadBalancerWithNaming);
     if (NULL == lb) {
         LOG(FATAL) << "Fail to new LoadBalancerWithNaming";
         return -1;        
@@ -388,8 +418,17 @@ int Channel::Init(const char* ns_url,
     ns_opt.log_succeed_without_server = _options.log_succeed_without_server;
     ns_opt.use_rdma = _options.use_rdma;
     ns_opt.channel_signature = ComputeChannelSignature(_options);
-    if (CreateSocketSSLContext(_options, &ns_opt.ssl_ctx) != 0) {
-        return -1;
+    if (NULL != _options.ssl_context_factory) {
+        ns_opt.ssl_context_factory = _options.ssl_context_factory;
+    } else {
+        std::shared_ptr<SocketSSLContext> ssl_ctx;
+        if (CreateSocketSSLContext(_options, &ssl_ctx) != 0) {
+            return -1;
+        }
+        if (NULL != ssl_ctx) {
+            ns_opt.ssl_context_factory =
+                std::make_shared<DefaultSSLContextFactory>(ssl_ctx, false);
+        }
     }
     if (lb->Init(ns_url, lb_name, _options.ns_filter, &ns_opt) != 0) {
         LOG(ERROR) << "Fail to initialize LoadBalancerWithNaming";

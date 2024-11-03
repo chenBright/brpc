@@ -143,7 +143,6 @@ ServerOptions::ServerOptions()
     , bthread_init_count(0)
     , internal_port(-1)
     , has_builtin_services(true)
-    , force_ssl(false)
     , use_rdma(false)
     , baidu_master_service(NULL)
     , http_master_service(NULL)
@@ -152,7 +151,9 @@ ServerOptions::ServerOptions()
     , redis_service(NULL)
     , bthread_tag(BTHREAD_TAG_DEFAULT)
     , rpc_pb_message_factory(NULL)
-    , ignore_eovercrowded(false) {
+    , ignore_eovercrowded(false)
+    , ssl_context_factory(NULL)
+    , force_ssl(false) {
     if (s_ncore > 0) {
         num_threads = s_ncore + 1;
     }
@@ -1160,9 +1161,13 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
         GenerateVersionIfNeeded();
         g_running_server_count.fetch_add(1, butil::memory_order_relaxed);
 
+        if (NULL == _options.ssl_context_factory && NULL != _default_ssl_ctx) {
+            _options.ssl_context_factory =
+                std::make_shared<DefaultSSLContextFactory>(_default_ssl_ctx, true);
+        }
         // Pass ownership of `sockfd' to `_am'
         if (_am->StartAccept(sockfd, _options.idle_timeout_sec,
-                             _default_ssl_ctx,
+                             _options.ssl_context_factory,
                              _options.force_ssl) != 0) {
             LOG(ERROR) << "Fail to start acceptor";
             return -1;
@@ -1203,7 +1208,7 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
         }
         // Pass ownership of `sockfd' to `_internal_am'
         if (_internal_am->StartAccept(sockfd, _options.idle_timeout_sec,
-                                      _default_ssl_ctx,
+                                      _options.ssl_context_factory,
                                       false) != 0) {
             LOG(ERROR) << "Fail to start internal_acceptor";
             return -1;
