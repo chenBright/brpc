@@ -380,6 +380,12 @@ brpc detects valgrind automatically (and registers stacks of bthread). Older val
 
 ## thrift: 0.9.3-0.11.0
 
+## libunwind: 1.3-1.8.1
+
+brpc does **not** link [libunwind](https://github.com/libunwind/libunwind) by default. Users link libunwind on-demand by adding *--with-glog* to config_brpc.sh or adding `-DWITH_GLOG=ON` to cmake.
+
+It is recommended to use the latest possible version of libunwind.
+
 no known issues.
 
 # Track instances

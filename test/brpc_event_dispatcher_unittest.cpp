@@ -446,8 +446,7 @@ friend class brpc::IOEvent<EventPipe>;
     }
 
     void BeforeRecycled() {
-        brpc::GetGlobalEventDispatcher(_pipe_fds[0], bthread_self_tag())
-            .RemoveConsumer(_pipe_fds[0]);
+        _io_event.RemoveConsumer(_pipe_fds[0]);
         _io_event.Reset();
         if (_pipe_fds[0] >= 0) {
             close(_pipe_fds[0]);

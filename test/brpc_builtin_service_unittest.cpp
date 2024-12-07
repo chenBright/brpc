@@ -113,7 +113,7 @@ void MyVLogSite() {
 void CheckContent(const brpc::Controller& cntl, const char* name) {
     const std::string& content = cntl.response_attachment().to_string();
     std::size_t pos = content.find(name);
-    ASSERT_TRUE(pos != std::string::npos) << "name=" << name;
+    ASSERT_TRUE(pos != std::string::npos) << "response_attachment=" << content << "\nname=" << name;
 }
 
 void CheckErrorText(const brpc::Controller& cntl, const char* error) {
@@ -837,6 +837,15 @@ void* dummy_bthread(void*) {
     return NULL;
 }
 
+
+bool g_bthread_trace_stop = false;
+void* bthread_trace(void*) {
+    while (!g_bthread_trace_stop) {
+        bthread_usleep(1000 * 100);
+    }
+    return NULL;
+}
+
 TEST_F(BuiltinServiceTest, bthreads) {
     brpc::BthreadsService service;
     brpc::BthreadsRequest req;
@@ -867,7 +876,23 @@ TEST_F(BuiltinServiceTest, bthreads) {
         service.default_method(&cntl, &req, &res, &done);
         EXPECT_FALSE(cntl.Failed());
         CheckContent(cntl, "stop=0");
-    }    
+    }
+
+    {
+        bthread_t th;
+        EXPECT_EQ(0, bthread_start_background(&th, NULL, bthread_trace, NULL));
+        ClosureChecker done;
+        brpc::Controller cntl;
+        std::string id_string;
+        butil::string_printf(&id_string, "%llu?st=1", (unsigned long long)th);
+        cntl.http_request().uri().SetHttpURL("/bthreads/" + id_string);
+        cntl.http_request()._unresolved_path = id_string;
+        service.default_method(&cntl, &req, &res, &done);
+        g_bthread_trace_stop = true;
+        EXPECT_FALSE(cntl.Failed());
+        CheckContent(cntl, "stop=0");
+        CheckContent(cntl, "bthread_trace");
+    }
 }
 
 TEST_F(BuiltinServiceTest, sockets) {
