@@ -19,6 +19,7 @@
 
 // Date: Tue Jul 10 17:40:58 CST 2012
 
+#include <cxxabi.h>
 #include <gflags/gflags.h>
 #include "butil/macros.h"                       // BAIDU_CASSERT
 #include "butil/logging.h"
@@ -114,6 +115,25 @@ inline TaskControl* get_or_new_task_control() {
     p->store(c, butil::memory_order_release);
     return c;
 }
+
+#ifdef BRPC_BTHREAD_TRACER
+void stack_trace(std::ostream& os, bthread_t tid) {
+    TaskControl* c = get_task_control();
+    if (NULL == c) {
+        os << "TaskControl has not been created";
+        return;
+    }
+    c->stack_trace(os, tid);
+}
+
+std::string stack_trace(bthread_t tid) {
+    TaskControl* c = get_task_control();
+    if (NULL == c) {
+        return "TaskControl has not been created";
+    }
+    return c->stack_trace(tid);
+}
+#endif // BRPC_BTHREAD_TRACER
 
 static int add_workers_for_each_tag(int num) {
     int added = 0;
