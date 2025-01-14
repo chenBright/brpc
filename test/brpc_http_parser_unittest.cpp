@@ -26,6 +26,7 @@
 using brpc::http_parser;
 using brpc::http_parser_init;
 using brpc::http_parser_settings;
+using brpc::http_parser_url;
 
 class HttpParserTest : public testing::Test {
 protected:
@@ -108,6 +109,10 @@ TEST_F(HttpParserTest, http_example) {
     settings.on_header_value = on_header_value;
     settings.on_body = on_body;
     LOG(INFO) << http_parser_execute(&parser, &settings, http_request, strlen(http_request));
+
+    std::string path = "baidu.com:443";
+    struct http_parser_url u{};
+    ASSERT_EQ(0, http_parser_parse_url(path.c_str(), path.size(), 1, &u));
 }
 
 TEST_F(HttpParserTest, append_filename) {

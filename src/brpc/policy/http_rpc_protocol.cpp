@@ -673,6 +673,15 @@ void PackHttpRequest(butil::IOBuf* buf,
     if (cntl->connection_type() == CONNECTION_TYPE_SINGLE) {
         return cntl->SetFailed(EREQUEST, "http can't work with CONNECTION_TYPE_SINGLE");
     }
+    struct http_parser_url u{};
+    if (http_parser_parse_url(cntl->http_request().uri().path().c_str(),
+                              cntl->http_request().uri().path().size(),
+                              cntl->http_request().method() == brpc::HTTP_METHOD_CONNECT,
+                              &u) != 0) {
+        // https://datatracker.ietf.org/doc/html/rfc2616#section-5.1.2
+        return cntl->SetFailed(EREQUEST, "Invalid path=%s",
+                               cntl->http_request().uri().path().c_str());
+    }
     ControllerPrivateAccessor accessor(cntl);
     HttpHeader* header = &cntl->http_request();
     if (auth != NULL && header->GetHeader(common->AUTHORIZATION) == NULL) {
