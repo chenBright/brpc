@@ -16,7 +16,9 @@
 // under the License.
 
 #include <gtest/gtest.h>
+#ifndef BUTIL_USE_ASAN
 #include <butil/gperftools_profiler.h>
+#endif // BUTIL_USE_ASAN
 #include <bthread/rwlock.h>
 
 namespace {
@@ -286,6 +288,7 @@ TEST(RWLockTest, mix_thread_types) {
     ASSERT_EQ(0, bthread_rwlock_destroy(&rw));
 }
 
+#ifndef BUTIL_USE_ASAN
 struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
     bthread_rwlock_t* rw;
     int64_t counter;
@@ -401,6 +404,7 @@ TEST(RWLockTest, performance) {
     PerfTest(100, (pthread_t*)NULL, thread_num, pthread_create, pthread_join);
     PerfTest(100, (bthread_t*)NULL, thread_num, bthread_start_background, bthread_join);
 }
+#endif // BUTIL_USE_ASAN
 
 
 void* read_thread(void* arg) {
@@ -447,6 +451,7 @@ TEST(RWLockTest, pthread_rdlock_performance) {
         long* res = NULL;
         pthread_join(rth[i], (void**)&res);
         printf("read thread %lu = %ldns\n", i, *res);
+        delete res;
     }
     pthread_join(wth, NULL);
 #ifdef CHECK_RWLOCK

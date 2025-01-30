@@ -25,7 +25,9 @@
 #include "bthread/butex.h"
 #include "bthread/task_control.h"
 #include "bthread/mutex.h"
+#ifndef BUTIL_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BUTIL_USE_ASAN
 
 namespace {
 inline unsigned* get_butex(bthread_mutex_t & m) {
@@ -174,7 +176,9 @@ void* add_with_mutex(void* void_arg) {
     return NULL;
 }
 
+#ifndef BUTIL_USE_ASAN
 int g_prof_name_counter = 0;
+#endif // BUTIL_USE_ASAN
 
 template <typename Mutex, typename ThreadId,
           typename ThreadCreateFn, typename ThreadJoinFn>
@@ -205,11 +209,15 @@ void PerfTest(Mutex* mutex,
         usleep(1000);
     }
     g_started = true;
+#ifndef BUTIL_USE_ASAN
     char prof_name[32];
-    snprintf(prof_name, sizeof(prof_name), "mutex_perf_%d.prof", ++g_prof_name_counter); 
+    snprintf(prof_name, sizeof(prof_name), "mutex_perf_%d.prof", ++g_prof_name_counter);
     ProfilerStart(prof_name);
+#endif // BUTIL_USE_ASAN
     usleep(500 * 1000);
+#ifndef BUTIL_USE_ASAN
     ProfilerStop();
+#endif // BUTIL_USE_ASAN
     g_stopped = true;
     int64_t wait_time = 0;
     int64_t count = 0;

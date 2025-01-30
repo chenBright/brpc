@@ -179,3 +179,21 @@ jobs:
         run: |
           cd test
           sh ./run_tests.sh
+
+  clang-unittest-asan:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+      - uses: ./.github/actions/install-essential-dependences
+      - uses: ./.github/actions/init-ut-make-config
+        with:
+          options: --cc=clang --cxx=clang++ --with-bthread-tracer --with-asan
+      - name: compile tests
+        run: |
+          cat config.mk
+          cd test
+          make -j ${{env.proc_num}}
+      - name: run tests
+        run: |
+          cd test
+          sh ./run_tests.sh

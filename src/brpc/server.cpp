@@ -22,6 +22,7 @@
 #include <sys/stat.h>                               // mkdir
 #include <gflags/gflags.h>
 #include <google/protobuf/descriptor.h>             // ServiceDescriptor
+#include <butil/debug/leak_annotations.h>
 #include "idl_options.pb.h"                         // option(idl_support)
 #include "bthread/unstable.h"                       // bthread_keytable_pool_init
 #include "butil/macros.h"                           // ARRAY_SIZE

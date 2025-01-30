@@ -22,7 +22,9 @@
 #include <condition_variable>
 #endif
 #include <gtest/gtest.h>
+#ifndef BUTIL_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BUTIL_USE_ASAN
 #include "bvar/utils/lock_timer.h"
 
 namespace {
@@ -220,36 +222,48 @@ TEST_F(LockTimerTest, overhead) {
     MutexWithLatencyRecorder<DummyMutex> m0(r0);
     butil::Timer timer;
     const size_t N = 1000 * 1000 * 10;
-    
+
+#ifndef BUTIL_USE_ASAN
     ProfilerStart("mutex_with_latency_recorder.prof");
+#endif // BUTIL_USE_ASAN
     timer.start();
     for (size_t i = 0; i < N; ++i) {
         BAIDU_SCOPED_LOCK(m0);
     }
     timer.stop();
+#ifndef BUTIL_USE_ASAN
     ProfilerStop();
+#endif // BUTIL_USE_ASAN
     LOG(INFO) << "The overhead of MutexWithLatencyRecorder is "
               << timer.n_elapsed() / N << "ns";
 
     IntRecorder r1;
     MutexWithRecorder<DummyMutex> m1(r1);
+#ifndef BUTIL_USE_ASAN
     ProfilerStart("mutex_with_recorder.prof");
+#endif // BUTIL_USE_ASAN
     timer.start();
     for (size_t i = 0; i < N; ++i) {
         BAIDU_SCOPED_LOCK(m1);
     }
     timer.stop();
+#ifndef BUTIL_USE_ASAN
     ProfilerStop();
+#endif // BUTIL_USE_ASAN
     LOG(INFO) << "The overhead of MutexWithRecorder is "
               << timer.n_elapsed() / N << "ns";
     MutexWithRecorder<DummyMutex> m2;
+#ifndef BUTIL_USE_ASAN
     ProfilerStart("mutex_with_timer.prof");
+#endif // BUTIL_USE_ASAN
     timer.start();
     for (size_t i = 0; i < N; ++i) {
         BAIDU_SCOPED_LOCK(m2);
     }
     timer.stop();
+#ifndef BUTIL_USE_ASAN
     ProfilerStop();
+#endif // BUTIL_USE_ASAN
     LOG(INFO) << "The overhead of timer is "
               << timer.n_elapsed() / N << "ns";
 }

@@ -32,7 +32,7 @@ void __lsan_do_leak_check();
 }  // extern "C"
 
 class ScopedLeakSanitizerDisabler {
- public:
+public:
   ScopedLeakSanitizerDisabler() { __lsan_disable(); }
   ~ScopedLeakSanitizerDisabler() { __lsan_enable(); }
  private:
