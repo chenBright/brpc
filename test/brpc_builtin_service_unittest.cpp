@@ -25,7 +25,9 @@
 #include <gtest/gtest.h>
 #include <gflags/gflags.h>
 #include <google/protobuf/descriptor.h>
+#ifndef BUTIL_USE_ASAN
 #include "butil/gperftools_profiler.h"
+#endif // BUTIL_USE_ASAN
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "brpc/socket.h"
@@ -717,6 +719,7 @@ TEST_F(BuiltinServiceTest, rpcz) {
     }
 }
 
+#ifndef BUTIL_USE_ASAN
 TEST_F(BuiltinServiceTest, pprof) {
     brpc::PProfService service;
     {
@@ -758,6 +761,7 @@ TEST_F(BuiltinServiceTest, pprof) {
         CheckContent(cntl, "brpc_builtin_service_unittest");
     }
 }
+#endif // BUTIL_USE_ASAN
 
 TEST_F(BuiltinServiceTest, dir) {
     brpc::DirService service;
@@ -933,6 +937,7 @@ TEST_F(BuiltinServiceTest, sockets) {
     }    
 }
 
+#ifndef BUTIL_USE_ASAN
 TEST_F(BuiltinServiceTest, memory) {
     brpc::MemoryService service;
     brpc::MemoryRequest req;
@@ -950,3 +955,4 @@ TEST_F(BuiltinServiceTest, memory) {
     CheckContent(cntl, "tcmalloc.pageheap_free_bytes");
     CheckContent(cntl, "tcmalloc.pageheap_unmapped_bytes");
 }
+#endif // BUTIL_USE_ASAN

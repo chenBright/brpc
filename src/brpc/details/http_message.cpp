@@ -415,6 +415,7 @@ void HttpMessage::SetBodyReader(ProgressiveReader* r) {
                 pthread_once(&s_fail_all_read_once, CreateFailAllRead);
                 r = s_fail_all_read;
                 ntry = MAX_TRY;
+                // todo return?
                 break;
             }
         }

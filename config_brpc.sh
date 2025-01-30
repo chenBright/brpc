@@ -38,12 +38,13 @@ else
     LDD=ldd
 fi
 
-TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,with-bthread-tracer,with-debug-bthread-sche-safety,with-debug-lock,nodebugsymbols,werror -n 'config_brpc' -- "$@"`
+TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,with-bthread-tracer,with-debug-bthread-sche-safety,with-debug-lock,with-asan,nodebugsymbols,werror -n 'config_brpc' -- "$@"`
 WITH_GLOG=0
 WITH_THRIFT=0
 WITH_RDMA=0
 WITH_MESALINK=0
 WITH_BTHREAD_TRACER=0
+WITH_ASAN=0
 BRPC_DEBUG_BTHREAD_SCHE_SAFETY=0
 DEBUGSYMBOLS=-g
 WERROR=
@@ -74,6 +75,7 @@ while true; do
         --with-bthread-tracer) WITH_BTHREAD_TRACER=1; shift 1 ;;
         --with-debug-bthread-sche-safety ) BRPC_DEBUG_BTHREAD_SCHE_SAFETY=1; shift 1 ;;
         --with-debug-lock ) BRPC_DEBUG_LOCK=1; shift 1 ;;
+        --with-asan) WITH_ASAN=1; shift 1 ;;
         --nodebugsymbols ) DEBUGSYMBOLS=; shift 1 ;;
         --werror ) WERROR=-Werror; shift 1 ;;
         -- ) shift; break ;;
@@ -345,6 +347,12 @@ else
     CXXFLAGS="-std=c++0x"
 fi
 
+if [ $WITH_ASAN != 0 ]; then
+  CPPFLAGS="-DBAIDU_CLEAR_OBJECT_POOL_AFTER_ALL_THREADS_QUIT"
+  CXXFLAGS="$CXXFLAGS -fsanitize=address"
+  DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -fsanitize=address"
+fi
+
 LEVELDB_HDR=$(find_dir_of_header_or_die leveldb/db.h)
 
 CPPFLAGS=
@@ -425,7 +433,7 @@ append_to_output "STATIC_LINKINGS=$STATIC_LINKINGS"
 append_to_output "DYNAMIC_LINKINGS=$DYNAMIC_LINKINGS"
 
 # CPP means C PreProcessing, not C PlusPlus
-CPPFLAGS="${CPPFLAGS}  -DBRPC_WITH_GLOG=$WITH_GLOG -DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=$BRPC_DEBUG_BTHREAD_SCHE_SAFETY -DBRPC_DEBUG_LOCK=$BRPC_DEBUG_LOCK"
+CPPFLAGS="${CPPFLAGS} -DBRPC_WITH_GLOG=$WITH_GLOG -DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=$BRPC_DEBUG_BTHREAD_SCHE_SAFETY -DBRPC_DEBUG_LOCK=$BRPC_DEBUG_LOCK"
 
 # Avoid over-optimizations of TLS variables by GCC>=4.8
 # See: https://github.com/apache/brpc/issues/1693

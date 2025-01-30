@@ -25,12 +25,13 @@
 #include <iostream>                      // std::ostream
 #include <pthread.h>                     // pthread_mutex_t
 #include <algorithm>                     // std::max, std::min
-#include "butil/atomicops.h"             // butil::atomic
-#include "butil/macros.h"                // BAIDU_CACHELINE_ALIGNMENT
-#include "butil/scoped_lock.h"           // BAIDU_SCOPED_LOCK
-#include "butil/thread_local.h"          // BAIDU_THREAD_LOCAL
-#include "butil/memory/aligned_memory.h" // butil::AlignedMemory
 #include <vector>
+#include "butil/atomicops.h"              // butil::atomic
+#include "butil/macros.h"                 // BAIDU_CACHELINE_ALIGNMENT
+#include "butil/scoped_lock.h"            // BAIDU_SCOPED_LOCK
+#include "butil/thread_local.h"           // BAIDU_THREAD_LOCAL
+#include "butil/debug/address_annotations.h"
+#include "butil/memory/aligned_memory.h"
 
 #ifdef BUTIL_OBJECT_POOL_NEED_FREE_ITEM_NUM
 #define BAIDU_OBJECT_POOL_FREE_ITEM_NUM_ADD1                    \
@@ -54,7 +55,35 @@ template <typename T>
 struct ObjectPoolFreeChunk<T, 0> {
     size_t nfree;
     T* ptrs[0];
-}; 
+};
+
+// todo delete
+#ifdef BUTIL_USE_ASAN
+template <typename T, size_t NITEM>
+class ObjectPoolQuarantineChunk {
+public:
+    ObjectPoolQuarantineChunk() : _start(0), _count(0) {}
+
+    T* ElimPush(T* ptr) {
+        T* res = NULL;
+        if (_count == NITEM) {
+            res = _ptrs[_start];
+            _start = Mod(_start + 1);
+        }
+        _ptrs[Mod(_start + _count)] = ptr;
+        ++_count;
+        return res;
+    }
+
+private:
+    uint32_t Mod(uint32_t off) {
+        return off % NITEM;
+    }
+    uint32_t _start;
+    uint32_t _count;
+    T* _ptrs[NITEM];
+};
+#endif
 
 struct ObjectPoolInfo {
     size_t local_pool_num;
@@ -88,11 +117,17 @@ class BAIDU_CACHELINE_ALIGNMENT ObjectPool {
 public:
     static const size_t BLOCK_NITEM = ObjectPoolBlockItemNum<T>::value;
     static const size_t FREE_CHUNK_NITEM = BLOCK_NITEM;
+#ifdef BUTIL_USE_ASAN
+    static const size_t Quarantine_CHUNK_NITEM = BLOCK_NITEM;
+#endif
 
     // Free objects are batched in a FreeChunk before they're added to
     // global list(_free_chunks).
     typedef ObjectPoolFreeChunk<T, FREE_CHUNK_NITEM>    FreeChunk;
     typedef ObjectPoolFreeChunk<T, 0> DynamicFreeChunk;
+#ifdef BUTIL_USE_ASAN
+    typedef ObjectPoolQuarantineChunk<T, Quarantine_CHUNK_NITEM> QuarantineChunk;
+#endif
 
     typedef AlignedMemory<sizeof(T), __alignof__(T)> BlockItem;
     // When a thread needs memory, it allocates a Block. To improve locality,
@@ -169,6 +204,7 @@ public:
                 obj->~T();                                              \
                 return NULL;                                            \
             }                                                           \
+            BRPC_ASAN_POISON_MEMORY_REGION(obj, sizeof(BlockItem)); \
             ++_cur_block->nitem;                                        \
             return obj;                                                 \
         }                                                               \
@@ -181,15 +217,12 @@ public:
                 obj->~T();                                              \
                 return NULL;                                            \
             }                                                           \
+            BRPC_ASAN_POISON_MEMORY_REGION(obj, sizeof(BlockItem)); \
             ++_cur_block->nitem;                                        \
             return obj;                                                 \
         }                                                               \
         return NULL;                                                    \
- 
 
-        inline T* get() {
-            BAIDU_OBJECT_POOL_GET();
-        }
 
         template<typename... Args>
         inline T* get(Args&&... args) {
@@ -199,6 +232,14 @@ public:
 #undef BAIDU_OBJECT_POOL_GET
 
         inline int return_object(T* ptr) {
+            if (NULL == ptr) {
+                return 0;
+            }
+
+#ifdef BUTIL_USE_ASAN
+            // ptr = _cur_quarantine.ElimPush(ptr);
+            BRPC_ASAN_POISON_MEMORY_REGION(ptr, sizeof(BlockItem));
+#endif
             // Return to local free list
             if (_cur_free.nfree < ObjectPool::free_chunk_nitem()) {
                 _cur_free.ptrs[_cur_free.nfree++] = ptr;
@@ -225,6 +266,9 @@ public:
         Block* _cur_block;
         size_t _cur_block_index;
         FreeChunk _cur_free;
+#ifdef BUTIL_USE_ASAN
+        QuarantineChunk _cur_quarantine;
+#endif
     };
 
     inline bool local_free_empty() {
@@ -238,10 +282,17 @@ public:
     template <typename... Args>
     inline T* get_object(Args&&... args) {
         LocalPool* lp = get_or_new_local_pool();
+        T* ptr = NULL;
         if (BAIDU_LIKELY(lp != NULL)) {
-            return lp->get(std::forward<Args>(args)...);
+            ptr = lp->get(std::forward<Args>(args)...);
+#ifdef BUTIL_USE_ASAN
+            if (NULL == ptr) {
+                return NULL;
+            }
+            BRPC_ASAN_UNPOISON_MEMORY_REGION(ptr, sizeof(T));
+#endif
         }
-        return NULL;
+        return ptr;
     }
 
     inline int return_object(T* ptr) {
@@ -432,8 +483,11 @@ private:
                     continue;
                 }
                 for (size_t k = 0; k < b->nitem; ++k) {
-                    T* const objs = (T*)b->items;
-                    objs[k].~T();
+                    T* obj = (T*)&b->items[k];
+                    BRPC_ASAN_UNPOISON_MEMORY_REGION(obj, sizeof(BlockItem));
+                    obj->~T();
+                    // if (NULL != objs && BRPC_ASAN_ADDRESS_IS_POISONED(objs)) {
+                    // }
                 }
                 delete b;
             }

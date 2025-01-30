@@ -25,8 +25,80 @@
 DECLARE_int32(guard_page_size);
 DECLARE_int32(tc_stack_small);
 DECLARE_int32(tc_stack_normal);
+DECLARE_uint32(stack_quarantine_queue_size);
 
 namespace bthread {
+namespace internal {
+
+// todo 搞成宏？
+
+BUTIL_FORCE_INLINE
+void ASanPoisonMemoryRegion(const StackStorage& storage) {
+    if (NULL == storage.bottom) {
+        return;
+    }
+
+    CHECK_GT((void*)storage.bottom,
+        reinterpret_cast<void*>(storage.stacksize + + storage.guardsize));
+    BRPC_ASAN_POISON_MEMORY_REGION(
+        (char*)storage.bottom - storage.stacksize,
+        storage.stacksize);
+}
+
+BUTIL_FORCE_INLINE
+void ASanUnpoisonMemoryRegion(const StackStorage& storage) {
+    if (NULL == storage.bottom) {
+        return;
+    }
+    CHECK_GT(storage.bottom,
+        reinterpret_cast<void*>(storage.stacksize + storage.guardsize));
+    BRPC_ASAN_UNPOISON_MEMORY_REGION(
+        (char*)storage.bottom - storage.stacksize,
+        storage.stacksize);
+}
+
+
+BUTIL_FORCE_INLINE
+void StartSwitchFiber(void** fake_stack_save, StackStorage& storage) {
+    if (NULL == storage.bottom) {
+        return;
+    }
+    RELEASE_ASSERT(storage.bottom >
+        reinterpret_cast<void*>(storage.stacksize + storage.guardsize));
+    // Lowest address of this fiber's stack.
+    void* asan_stack_bottom = (char*)storage.bottom - storage.stacksize;
+    BRPC_ASAN_START_SWITCH_FIBER(
+        fake_stack_save, asan_stack_bottom, storage.stacksize);
+}
+
+BUTIL_FORCE_INLINE
+void FinishSwitchFiber(void* fake_stack_save) {
+    BRPC_ASAN_FINISH_SWITCH_FIBER(fake_stack_save, NULL, NULL);
+}
+
+class ScopedASanFiberSwitcher {
+public:
+    ScopedASanFiberSwitcher(StackStorage& storage, bool ending)
+        :_fake_stack(NULL) {
+        // If bthread will be quit here, pass NULL as `fake_stack_save',
+        // so that ASan knows it can destroy the fake stack.
+        StartSwitchFiber(ending ? NULL : &_fake_stack, storage);
+    }
+
+    ~ScopedASanFiberSwitcher() {
+        FinishSwitchFiber(_fake_stack);
+    }
+
+    DISALLOW_COPY_AND_ASSIGN(ScopedASanFiberSwitcher);
+
+private:
+    void* _fake_stack;
+};
+
+#define ANNOTATE_SCOPED_ASAN_FIBER_SWITCHER(storage, ending) \
+    ::bthread::internal::ScopedASanFiberSwitcher switcher(storage, ending)
+
+} // namespace internal
 
 struct MainStackClass {};
 
@@ -57,10 +129,18 @@ template <typename StackClass> struct StackFactory {
             }
             context = bthread_make_fcontext(storage.bottom, storage.stacksize, entry);
             stacktype = (StackType)StackClass::stacktype;
+#ifdef BUTIL_USE_ASAN
+            // It's poisoned prior to use.
+            internal::ASanPoisonMemoryRegion(storage);
+#endif
         }
         ~Wrapper() {
             if (context) {
                 context = NULL;
+#ifdef BUTIL_USE_ASAN
+                // Unpoison to avoid affecting other allocator.
+                internal::ASanUnpoisonMemoryRegion(storage);
+#endif
                 deallocate_stack_storage(&storage);
                 storage.zeroize();
             }
@@ -68,11 +148,18 @@ template <typename StackClass> struct StackFactory {
     };
     
     static ContextualStack* get_stack(void (*entry)(intptr_t)) {
-        return butil::get_object<Wrapper>(entry);
+        ContextualStack* cs = butil::get_object<Wrapper>(entry);
+        internal::ASanUnpoisonMemoryRegion(cs->storage);
+        return cs;
     }
     
-    static void return_stack(ContextualStack* sc) {
-        butil::return_object(static_cast<Wrapper*>(sc));
+    static void return_stack(ContextualStack* cs) {
+#ifdef BUTIL_USE_ASAN
+        // bthread has been quit here, pass NULL as `fake_stack_save',
+        // so that ASan knows it can destroy the fake stack.
+        internal::ASanPoisonMemoryRegion(cs->storage);
+#endif
+        butil::return_object(static_cast<Wrapper*>(cs));
     }
 };
 
@@ -129,7 +216,7 @@ inline void return_stack(ContextualStack* s) {
 }
 
 inline void jump_stack(ContextualStack* from, ContextualStack* to) {
-    bthread_jump_fcontext(&from->context, to->context, 0/*not skip remained*/);
+    bthread_jump_fcontext(&from->context, to->context, 0);
 }
 
 }  // namespace bthread
