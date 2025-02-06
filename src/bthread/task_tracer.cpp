@@ -305,7 +305,8 @@ TaskTracer::Result TaskTracer::TraceImpl(bthread_t tid) {
     return result;
 }
 
-unw_cursor_t TaskTracer::MakeCursor(bthread_fcontext_t fcontext) {
+// Instruct ASan to ignore this function.
+BUTIL_ATTRIBUTE_NO_SANITIZE_ADDRESS unw_cursor_t TaskTracer::MakeCursor(bthread_fcontext_t fcontext) {
     unw_cursor_t cursor;
     unw_init_local(&cursor, &_context);
     auto regs = reinterpret_cast<uintptr_t*>(fcontext);
