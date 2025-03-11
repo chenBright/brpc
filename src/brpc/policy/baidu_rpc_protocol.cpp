@@ -56,6 +56,8 @@ DEFINE_bool(baidu_protocol_use_fullname, true,
 DEFINE_bool(baidu_std_protocol_deliver_timeout_ms, false,
             "If this flag is true, baidu_std puts timeout_ms in requests.");
 
+DEFINE_bool(baidu_protocol_contiguous_body, true, "");
+
 // Notes:
 // 1. 12-byte header [PRPC][body_size][meta_size]
 // 2. body_size and meta_size are in network byte order
@@ -96,8 +98,9 @@ static void SerializeRpcHeaderAndMeta(
 
 ParseResult ParseRpcMessage(butil::IOBuf* source, Socket* socket,
                             bool /*read_eof*/, const void*) {
-    char header_buf[12];
-    const size_t n = source->copy_to(header_buf, sizeof(header_buf));
+    constexpr size_t HEADER_LEN = 12;
+    char header_buf[HEADER_LEN];
+    const size_t n = source->copy_to(header_buf, HEADER_LEN);
     if (n >= 4) {
         void* dummy = header_buf;
         if (*(const uint32_t*)dummy != *(const uint32_t*)"PRPC") {
@@ -108,29 +111,34 @@ ParseResult ParseRpcMessage(butil::IOBuf* source, Socket* socket,
             return MakeParseError(PARSE_ERROR_TRY_OTHERS);
         }
     }
-    if (n < sizeof(header_buf)) {
+    if (n < HEADER_LEN) {
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
     uint32_t body_size;
     uint32_t meta_size;
     butil::RawUnpacker(header_buf + 4).unpack32(body_size).unpack32(meta_size);
+    uint32_t pack_size = HEADER_LEN + body_size;
     if (body_size > FLAGS_max_body_size) {
         // We need this log to report the body_size to give users some clues
         // which is not printed in InputMessenger.
         LOG(ERROR) << "body_size=" << body_size << " from "
                    << socket->remote_side() << " is too large";
         return MakeParseError(PARSE_ERROR_TOO_BIG_DATA);
-    } else if (source->length() < sizeof(header_buf) + body_size) {
+    } else if (source->length() < pack_size) {
+        if (FLAGS_baidu_protocol_contiguous_body &&
+            !source->is_reserve_contiguous(pack_size)) {
+            source->reserve_contiguous(pack_size);
+        }
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
     if (meta_size > body_size) {
         LOG(ERROR) << "meta_size=" << meta_size << " is bigger than body_size="
                    << body_size;
         // Pop the message
-        source->pop_front(sizeof(header_buf) + body_size);
+        source->pop_front(HEADER_LEN + body_size);
         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
     }
-    source->pop_front(sizeof(header_buf));
+    source->pop_front(HEADER_LEN);
     MostCommonMessage* msg = MostCommonMessage::Get();
     source->cutn(&msg->meta, meta_size);
     source->cutn(&msg->payload, body_size - meta_size);

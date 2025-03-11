@@ -19,7 +19,7 @@
 
 // Date: Thu Nov 22 13:57:56 CST 2012
 
-#include "butil/ssl_compat.h"               // BIO_fd_non_fatal_error
+#include "butil/ssl_compat.h"              // BIO_fd_non_fatal_error
 #include <openssl/err.h>
 #include <openssl/ssl.h>                   // SSL_*
 #ifdef USE_MESALINK
@@ -39,9 +39,18 @@
 #include "butil/fd_guard.h"                 // butil::fd_guard
 #include "butil/iobuf.h"
 #include "butil/iobuf_profiler.h"
+#include "butil/containers/linked_list.h"
+#include <butil/reloadable_flags.h>
 
 namespace butil {
+
+DEFINE_uint32(io_block_size, 8192, "Custom block size for IOBuf");
+BUTIL_VALIDATE_GFLAG(io_block_size, [](const char*, uint32_t value) {
+    return value > 0 &&  value % 8192 == 0;
+});
+
 namespace iobuf {
+
 
 typedef ssize_t (*iov_function)(int fd, const struct iovec *vector,
                                    int count, off_t offset);
@@ -165,6 +174,8 @@ void* cp(void *__restrict dest, const void *__restrict src, size_t n) {
 void* (*blockmem_allocate)(size_t) = ::malloc;
 void  (*blockmem_deallocate)(void*) = ::free;
 
+void return_continuous_block(IOBuf::Block* b);
+
 void remove_tls_block_chain();
 
 // Use default function pointers
@@ -196,6 +207,7 @@ size_t IOBuf::new_bigview_count() {
 
 const uint16_t IOBUF_BLOCK_FLAGS_USER_DATA = 1 << 0;
 const uint16_t IOBUF_BLOCK_FLAGS_SAMPLED = 1 << 1;
+const uint16_t IOBUF_BLOCK_FLAGS_RESERVE_CONTIGUOUS = 1 << 2;
 using UserDataDeleter = std::function<void(void*)>;
 
 struct UserDataExtension {
@@ -203,29 +215,24 @@ struct UserDataExtension {
 };
 
 struct IOBuf::Block {
-    butil::atomic<int> nshared;
-    uint16_t flags;
-    uint16_t abi_check;  // original cap, never be zero.
-    uint32_t size;
-    uint32_t cap;
+    butil::atomic<int> nshared{1};
+    uint16_t flags{0};
+    uint16_t abi_check{0};  // original cap, never be zero.
+    uint32_t size{0};
+    uint32_t cap{0};
     // When flag is 0, portal_next is valid.
     // When flag & IOBUF_BLOCK_FLAGS_USER_DATA is non-0, data_meta is valid.
     union {
         Block* portal_next;
         uint64_t data_meta;
-    } u;
+    } u{NULL};
     // When flag is 0, data points to `size` bytes starting at `(char*)this+sizeof(Block)'
     // When flag & IOBUF_BLOCK_FLAGS_USER_DATA is non-0, data points to the user data and
     // the deleter is put in UserDataExtension at `(char*)this+sizeof(Block)'
-    char* data;
+    char* data{NULL};
         
     Block(char* data_in, uint32_t data_size)
-        : nshared(1)
-        , flags(0)
-        , abi_check(0)
-        , size(0)
-        , cap(data_size)
-        , u({NULL})
+        : cap(data_size)
         , data(data_in) {
         iobuf::g_nblock.fetch_add(1, butil::memory_order_relaxed);
         iobuf::g_blockmem.fetch_add(data_size + sizeof(Block),
@@ -236,15 +243,21 @@ struct IOBuf::Block {
     }
 
     Block(char* data_in, uint32_t data_size, UserDataDeleter deleter)
-        : nshared(1)
-        , flags(IOBUF_BLOCK_FLAGS_USER_DATA)
-        , abi_check(0)
+        : flags(IOBUF_BLOCK_FLAGS_USER_DATA)
         , size(data_size)
         , cap(data_size)
-        , u({0})
         , data(data_in) {
         auto ext = new (get_user_data_extension()) UserDataExtension();
         ext->deleter = std::move(deleter);
+        if (is_samplable()) {
+            SubmitIOBufSample(this, 1);
+        }
+    }
+
+    Block(char* data_in, uint32_t data_size, size_t c)
+        : size(data_size)
+        , cap(c)
+        , data(data_in) {
         if (is_samplable()) {
             SubmitIOBufSample(this, 1);
         }
@@ -256,7 +269,7 @@ struct IOBuf::Block {
         return (UserDataExtension*)(p + sizeof(Block));
     }
 
-    inline void check_abi() {
+    void check_abi() {
 #ifndef NDEBUG
         if (abi_check != 0) {
             LOG(FATAL) << "Your program seems to wrongly contain two "
@@ -284,8 +297,13 @@ struct IOBuf::Block {
                 iobuf::g_nblock.fetch_sub(1, butil::memory_order_relaxed);
                 iobuf::g_blockmem.fetch_sub(cap + sizeof(Block),
                                             butil::memory_order_relaxed);
-                this->~Block();
-                iobuf::blockmem_deallocate(this);
+                if (is_reserve_contiguous()) {
+                    iobuf::return_continuous_block(this);
+                } else {
+                    this->~Block();
+                    iobuf::blockmem_deallocate(this);
+                }
+
             } else if (flags & IOBUF_BLOCK_FLAGS_USER_DATA) {
                 auto ext = get_user_data_extension();
                 ext->deleter(data);
@@ -302,6 +320,13 @@ struct IOBuf::Block {
 
     bool full() const { return size >= cap; }
     size_t left_space() const { return cap - size; }
+
+    void set_reserve_contiguous() {
+        flags |= IOBUF_BLOCK_FLAGS_RESERVE_CONTIGUOUS;
+    }
+    bool is_reserve_contiguous() const {
+        return 0 != (flags & IOBUF_BLOCK_FLAGS_RESERVE_CONTIGUOUS);
+    }
 
 private:
     bool is_samplable() {
@@ -355,6 +380,11 @@ inline IOBuf::Block* create_block() {
     return create_block(IOBuf::DEFAULT_BLOCK_SIZE);
 }
 
+inline void destroy_block(IOBuf::Block* b) {
+    b->~Block();
+    iobuf::blockmem_deallocate(b);
+}
+
 // === Share TLS blocks between appending operations ===
 // Max number of blocks in each TLS. This is a soft limit namely
 // release_tls_block_chain() may exceed this limit sometimes.
@@ -365,18 +395,132 @@ inline int max_blocks_per_thread() {
     return IsIOBufProfilerEnabled() ? 0 : MAX_BLOCKS_PER_THREAD;
 }
 
-struct TLSData {
-    // Head of the TLS block chain.
-    IOBuf::Block* block_head;
-    
-    // Number of TLS blocks
-    int num_blocks;
-    
+static constexpr size_t MAX_TLS_BLOCK_SIZE = 1024 * 1024;
+static constexpr size_t TLS_BUCKET_NUM = MAX_TLS_BLOCK_SIZE / IOBuf::DEFAULT_BLOCK_SIZE;
+
+struct ContinuousTLSData {
+    struct BlockBucket : public butil::LinkNode<BlockBucket> {
+        IOBuf::Block* head{NULL};
+        // Number of TLS blocks
+        int num_blocks{0};
+
+        int64_t last_active_time{0};
+    };
+
+    ContinuousTLSData() {
+        std::for_each(_buckets, _buckets + TLS_BUCKET_NUM,
+                      [this](BlockBucket& bucket) {
+            _cold_queue.Append(&bucket);
+        });
+    }
+
+    IOBuf::Block* get_block(size_t block_size) {
+        if (block_size > MAX_TLS_BLOCK_SIZE) {
+            return iobuf::create_block(block_size);
+        }
+
+        size_t bucket_index = block_size / IOBuf::DEFAULT_BLOCK_SIZE;
+        BlockBucket& bucket = _buckets[bucket_index];
+        if (&bucket != _cold_queue.tail()) {
+            // Move the hottest bucket to the end of the cold queue.
+            bucket.RemoveFromList();
+            _cold_queue.Append(&bucket);
+        }
+
+        if (NULL != bucket.head) {
+            IOBuf::Block* block = bucket.head;
+            bucket.head = block->u.portal_next;
+            --bucket.num_blocks;
+            --_num_blocks;
+            block->inc_ref(); // nshared: 0 -> 1.
+            return block;
+        } else if (!_registered) {
+            _registered = true;
+            // Only register atexit at the first time
+            butil::thread_atexit(remove_blocks);
+        }
+
+        return iobuf::create_block((bucket_index + 1) * IOBuf::DEFAULT_BLOCK_SIZE);
+    }
+
+    void return_block(IOBuf::Block* b) {
+        size_t block_size = b->cap;
+        if (block_size > MAX_TLS_BLOCK_SIZE) {
+            iobuf::destroy_block(b);
+            return;
+        }
+
+        size_t bucket_index = block_size / IOBuf::DEFAULT_BLOCK_SIZE;
+        BlockBucket& bucket = _buckets[bucket_index];
+        // todo 需要另外的阈值吗？
+        if (bucket.num_blocks >= max_blocks_per_thread()) {
+            iobuf::destroy_block(b);
+            return;
+        }
+        b->u.portal_next = bucket.head;
+        bucket.head = b;
+        ++bucket.num_blocks;
+        ++_num_blocks;
+        // todo 需要另外的阈值
+        if (_num_blocks > 10 * max_blocks_per_thread()) {
+            CHECK(!_cold_queue.empty());
+            BlockBucket* cold_bucket = _cold_queue.head()->value();
+            IOBuf::Block* block = cold_bucket->head;
+            cold_bucket->head = block->u.portal_next;
+            --cold_bucket->num_blocks;
+            --_num_blocks;
+            iobuf::destroy_block(b);
+        } else if (!_registered) {
+            _registered = true;
+            // Only register atexit at the first time
+            butil::thread_atexit(remove_blocks);
+        }
+    }
+
+private:
+    static void remove_blocks();
+
+    BlockBucket _buckets[TLS_BUCKET_NUM]{};
+    butil::LinkedList<BlockBucket> _cold_queue;
+
+    // Number of TLS blocks of all buckets.
+    int _num_blocks{ 0};
+
+    // todo
     // True if the remote_tls_block_chain is registered to the thread.
-    bool registered;
+    bool _registered{false};
 };
 
-static __thread TLSData g_tls_data = { NULL, 0, false };
+struct TLSData {
+    // Head of the TLS block chain.
+    IOBuf::Block* block_head{NULL};
+    
+    // Number of TLS blocks
+    size_t num_blocks{0};
+    
+    // True if the remote_tls_block_chain is registered to the thread.
+    bool registered{false};
+};
+
+static thread_local TLSData g_tls_data;
+static thread_local TLSData g_io_portal_tls_data;
+static thread_local ContinuousTLSData g_continuous_tls_data;
+
+void return_continuous_block(IOBuf::Block* b) {
+    g_continuous_tls_data.return_block(b);
+}
+
+void iobuf::ContinuousTLSData::remove_blocks() {
+    iobuf::ContinuousTLSData& tls_data = iobuf::g_continuous_tls_data;
+    std::for_each(tls_data._buckets, tls_data._buckets + TLS_BUCKET_NUM,
+                  [](BlockBucket& bucket) {
+        while (bucket.head) {
+            IOBuf::Block* const saved_next = bucket.head->u.portal_next;
+            iobuf::destroy_block(bucket.head);
+            bucket.head = saved_next;
+        }
+    });
+}
 
 // Used in UT
 IOBuf::Block* get_tls_block_head() { return g_tls_data.block_head; }
@@ -463,7 +607,8 @@ inline void release_tls_block(IOBuf::Block* b) {
 // Return chained blocks to TLS.
 // NOTE: b MUST be non-NULL and all blocks linked SHOULD not be full.
 void release_tls_block_chain(IOBuf::Block* b) {
-    TLSData& tls_data = g_tls_data;
+    TLSData& tls_data =
+        b->cap > IOBuf::DEFAULT_BLOCK_SIZE ? g_io_portal_tls_data : g_tls_data;
     size_t n = 0;
     if (tls_data.num_blocks >= max_blocks_per_thread()) {
         do {
@@ -496,8 +641,9 @@ void release_tls_block_chain(IOBuf::Block* b) {
 }
 
 // Get and remove one (non-full) block from TLS. If TLS is empty, create one.
-IOBuf::Block* acquire_tls_block() {
-    TLSData& tls_data = g_tls_data;
+IOBuf::Block* acquire_tls_block(size_t block_size) {
+    TLSData& tls_data =
+        block_size > IOBuf::DEFAULT_BLOCK_SIZE ? g_io_portal_tls_data : g_tls_data;
     IOBuf::Block* b = tls_data.block_head;
     if (!b) {
         return create_block();
@@ -1165,6 +1311,10 @@ ssize_t IOBuf::cut_multiple_into_writer(
     return nw;
 }
 
+inline IOBuf::Block* IOBuf::get_block() {
+    return is_reserve_contiguous() && !_front_ref().block->full() ?
+           _front_ref().block : iobuf::share_tls_block();
+}
 
 void IOBuf::append(const IOBuf& other) {
     const size_t nref = other._ref_num();
@@ -1190,7 +1340,7 @@ void IOBuf::append(const Movable& movable_other) {
 }
 
 int IOBuf::push_back(char c) {
-    IOBuf::Block* b = iobuf::share_tls_block();
+    IOBuf::Block* b = get_block();
     if (BAIDU_UNLIKELY(!b)) {
         return -1;
     }
@@ -1217,7 +1367,7 @@ int IOBuf::append(void const* data, size_t count) {
     }
     size_t total_nc = 0;
     while (total_nc < count) {  // excluded count == 0
-        IOBuf::Block* b = iobuf::share_tls_block();
+        IOBuf::Block* b = get_block();
         if (BAIDU_UNLIKELY(!b)) {
             return -1;
         }
@@ -1235,7 +1385,7 @@ int IOBuf::append(void const* data, size_t count) {
 int IOBuf::appendv(const const_iovec* vec, size_t n) {
     size_t offset = 0;
     for (size_t i = 0; i < n;) {
-        IOBuf::Block* b = iobuf::share_tls_block();
+        IOBuf::Block* b = get_block();
         if (BAIDU_UNLIKELY(!b)) {
             return -1;
         }
@@ -1304,7 +1454,7 @@ int IOBuf::resize(size_t n, char c) {
     const size_t count = n - saved_len;
     size_t total_nc = 0;
     while (total_nc < count) {  // excluded count == 0
-        IOBuf::Block* b = iobuf::share_tls_block();
+        IOBuf::Block* b = get_block();
         if (BAIDU_UNLIKELY(!b)) {
             return -1;
         }
@@ -1603,11 +1753,61 @@ bool IOBuf::equals(const butil::IOBuf& other) const {
     return true;
 }
 
+bool IOBuf::is_contiguous() const {
+    return is_contiguous(length());
+}
+
+bool IOBuf::is_contiguous(size_t n) const {
+    size_t content_len = length();
+    return n < content_len && 0 != content_len &&
+           _ref_num() > 0 && n <= _front_ref().block->size;
+}
+
+bool IOBuf::is_reserve_contiguous() const {
+    if (_ref_num() != 1) {
+        return false;
+    }
+
+    const BlockRef& r = _front_ref();
+    return r.block->nshared == 1 &&
+           r.block->is_reserve_contiguous() &&
+           r.offset + r.length == r.block->size;
+}
+
+bool IOBuf::is_reserve_contiguous(size_t n) const {
+    if (!is_reserve_contiguous()) {
+        return false;
+    }
+
+    return _front_ref().offset + n <= _front_ref().block->cap;
+}
+
+void IOBuf::reserve_contiguous(size_t data_size) {
+    if (0 == data_size || is_reserve_contiguous(data_size)) {
+        return;
+    }
+
+    size_t content_size = size();
+    size_t actual_size = std::max(content_size, data_size);
+    size_t block_size = sizeof(IOBuf::Block) + actual_size;
+    iobuf::ContinuousTLSData& tls_data = iobuf::g_continuous_tls_data;
+    IOBuf::Block* b = tls_data.get_block(block_size);
+    CHECK_EQ(copy_to(b->data, content_size), content_size);
+    b->set_reserve_contiguous();
+    b->size += content_size;
+    IOBuf::clear();
+    IOBuf::BlockRef r = { 0, b->size, b };
+    // ContinuousTLSData do not hold the reference.
+    _move_back_ref(r);
+}
+
 ////////////////////////////// IOPortal //////////////////
 IOPortal::~IOPortal() { return_cached_blocks(); }
 
 IOPortal& IOPortal::operator=(const IOPortal& rhs) {
-    IOBuf::operator=(rhs);
+    if (this != &rhs) {
+        IOBuf::operator=(rhs);
+    }
     return *this;
 }
 
@@ -1616,80 +1816,57 @@ void IOPortal::clear() {
     return_cached_blocks();
 }
 
-const int MAX_APPEND_IOVEC = 64;
+class FDIReader : public IReader {
+public:
+    FDIReader(int fd, off_t offset) : _fd(fd), _offset(offset) {}
 
-ssize_t IOPortal::pappend_from_file_descriptor(
-    int fd, off_t offset, size_t max_count) {
-    iovec vec[MAX_APPEND_IOVEC];
-    int nvec = 0;
-    size_t space = 0;
-    Block* prev_p = NULL;
-    Block* p = _block;
-    // Prepare at most MAX_APPEND_IOVEC blocks or space of blocks >= max_count
-    do {
-        if (p == NULL) {
-            p = iobuf::acquire_tls_block();
-            if (BAIDU_UNLIKELY(!p)) {
-                errno = ENOMEM;
-                return -1;
-            }
-            if (prev_p != NULL) {
-                prev_p->u.portal_next = p;
-            } else {
-                _block = p;
-            }
+    ssize_t ReadV(const iovec* iov, int iovcnt) override {
+        ssize_t nr = 0;
+        if (_offset < 0) {
+            return readv(_fd, iov, iovcnt);
+        } else {
+            static iobuf::iov_function preadv_func = iobuf::get_preadv_func();
+            return preadv_func(_fd, iov, iovcnt, _offset);
         }
-        vec[nvec].iov_base = p->data + p->size;
-        vec[nvec].iov_len = std::min(p->left_space(), max_count - space);
-        space += vec[nvec].iov_len;
-        ++nvec;
-        if (space >= max_count || nvec >= MAX_APPEND_IOVEC) {
-            break;
-        }
-        prev_p = p;
-        p = p->u.portal_next;
-    } while (1);
-
-    ssize_t nr = 0;
-    if (offset < 0) {
-        nr = readv(fd, vec, nvec);
-    } else {
-        static iobuf::iov_function preadv_func = iobuf::get_preadv_func();
-        nr = preadv_func(fd, vec, nvec, offset);
-    }
-    if (nr <= 0) {  // -1 or 0
-        if (empty()) {
-            return_cached_blocks();
-        }
-        return nr;
     }
 
-    size_t total_len = nr;
-    do {
-        const size_t len = std::min(total_len, _block->left_space());
-        total_len -= len;
-        const IOBuf::BlockRef r = { _block->size, (uint32_t)len, _block };
-        _push_back_ref(r);
-        _block->size += len;
-        if (_block->full()) {
-            Block* const saved_next = _block->u.portal_next;
-            _block->dec_ref();  // _block may be deleted
-            _block = saved_next;
-        }
-    } while (total_len);
-    return nr;
+private:
+    int _fd;
+    off_t _offset;
+};
+
+ssize_t IOPortal::pappend_from_file_descriptor(int fd, off_t offset, size_t max_count) {
+    FDIReader reader(fd, offset);
+    return append_from_reader(&reader, max_count);
 }
+
+const int MAX_APPEND_IOVEC = 64;
 
 ssize_t IOPortal::append_from_reader(IReader* reader, size_t max_count) {
     iovec vec[MAX_APPEND_IOVEC];
     int nvec = 0;
     size_t space = 0;
+
+    // Put the reading data into the reverse contiguous block at first.
+    Block* rc_block = NULL;
+    if (is_reserve_contiguous() && !_front_ref().block->full()) {
+        rc_block = _front_ref().block;
+        vec[0].iov_base = rc_block->data + rc_block->size;
+        vec[nvec].iov_len = std::min(rc_block->left_space(), max_count - space);
+        space += vec[0].iov_len;
+        ++nvec;
+    }
+
     Block* prev_p = NULL;
     Block* p = _block;
     // Prepare at most MAX_APPEND_IOVEC blocks or space of blocks >= max_count
     do {
+        if (space >= max_count || nvec >= MAX_APPEND_IOVEC) {
+            break;
+        }
+
         if (p == NULL) {
-            p = iobuf::acquire_tls_block();
+            p = iobuf::acquire_tls_block(FLAGS_io_block_size);
             if (BAIDU_UNLIKELY(!p)) {
                 errno = ENOMEM;
                 return -1;
@@ -1704,9 +1881,6 @@ ssize_t IOPortal::append_from_reader(IReader* reader, size_t max_count) {
         vec[nvec].iov_len = std::min(p->left_space(), max_count - space);
         space += vec[nvec].iov_len;
         ++nvec;
-        if (space >= max_count || nvec >= MAX_APPEND_IOVEC) {
-            break;
-        }
         prev_p = p;
         p = p->u.portal_next;
     } while (1);
@@ -1720,7 +1894,15 @@ ssize_t IOPortal::append_from_reader(IReader* reader, size_t max_count) {
     }
 
     size_t total_len = nr;
-    do {
+    if (NULL != rc_block) {
+        size_t len = std::min(total_len, rc_block->left_space());
+        total_len -= len;
+        const IOBuf::BlockRef r = { rc_block->size, (uint32_t)len, rc_block };
+        // Merge BlockRef but not increase ref count.
+        _push_back_ref(r);
+        rc_block->size += len;
+    }
+    while (total_len > 0) {
         const size_t len = std::min(total_len, _block->left_space());
         total_len -= len;
         const IOBuf::BlockRef r = { _block->size, (uint32_t)len, _block };
@@ -1731,7 +1913,7 @@ ssize_t IOPortal::append_from_reader(IReader* reader, size_t max_count) {
             _block->dec_ref();  // _block may be deleted
             _block = saved_next;
         }
-    } while (total_len);
+    }
     return nr;
 }
 
@@ -1740,24 +1922,34 @@ ssize_t IOPortal::append_from_SSL_channel(
     SSL* ssl, int* ssl_error, size_t max_count) {
     size_t nr = 0;
     do {
-        if (!_block) {
-            _block = iobuf::acquire_tls_block();
-            if (BAIDU_UNLIKELY(!_block)) {
-                errno = ENOMEM;
-                *ssl_error = SSL_ERROR_SYSCALL;
-                return -1;
+        Block* block = NULL;
+        bool is_rc = false;
+        // Put the reading data into the reverse contiguous block at first.
+        if (is_reserve_contiguous() && !_front_ref().block->full()) {
+            block = _front_ref().block;
+            is_rc = true;
+        } else {
+            if (NULL == _block) {
+                _block = iobuf::acquire_tls_block(FLAGS_io_block_size);
+                if (BAIDU_UNLIKELY(!_block)) {
+                    errno = ENOMEM;
+                    *ssl_error = SSL_ERROR_SYSCALL;
+                    return -1;
+                }
             }
+            block = _block;
         }
 
-        const size_t read_len = std::min(_block->left_space(), max_count - nr);
+
+        const size_t read_len = std::min(block->left_space(), max_count - nr);
         ERR_clear_error();
-        const int rc = SSL_read(ssl, _block->data + _block->size, read_len);
+        const int rc = SSL_read(ssl, block->data + block->size, read_len);
         *ssl_error = SSL_get_error(ssl, rc);
         if (rc > 0) {
-            const IOBuf::BlockRef r = { (uint32_t)_block->size, (uint32_t)rc, _block };
+            const IOBuf::BlockRef r = { (uint32_t)block->size, (uint32_t)rc, block };
             _push_back_ref(r);
-            _block->size += rc;
-            if (_block->full()) {
+            block->size += rc;
+            if (block->full() && !is_rc) {
                 Block* const saved_next = _block->u.portal_next;
                 _block->dec_ref();  // _block may be deleted
                 _block = saved_next;
@@ -1998,7 +2190,7 @@ bool IOBufAsZeroCopyOutputStream::Next(void** data, int* size) {
         if (_block_size > 0) {
             _cur_block = iobuf::create_block(_block_size);
         } else {
-            _cur_block = iobuf::acquire_tls_block();
+            _cur_block = iobuf::acquire_tls_block(IOBuf::DEFAULT_BLOCK_SIZE);
         }
         if (_cur_block == NULL) {
             return false;

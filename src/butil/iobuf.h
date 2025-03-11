@@ -65,8 +65,8 @@ friend class IOBufAsZeroCopyOutputStream;
 friend class IOBufBytesIterator;
 friend class IOBufCutter;
 public:
-    static const size_t DEFAULT_BLOCK_SIZE = 8192;
-    static const size_t INITIAL_CAP = 32; // must be power of 2
+    static constexpr size_t DEFAULT_BLOCK_SIZE = 8192;
+    static constexpr size_t INITIAL_CAP = 32; // must be power of 2
 
     struct Block;
 
@@ -114,6 +114,9 @@ public:
     IOBuf();
     IOBuf(const IOBuf&);
     IOBuf(const Movable&);
+    // Fixme!!! ~IOBuf should be virtual, but Socket::WriteRequest limits
+    // the size of IOBuf to a maximum of 32 bytes, resulting in no space
+    // in IOBuf to add a virtual table pointer.
     ~IOBuf() { clear(); }
     void operator=(const IOBuf&);
     void operator=(const Movable&);
@@ -366,6 +369,13 @@ public:
     // Make a movable version of self
     Movable movable() { return Movable(*this); }
 
+    // todo
+    bool is_contiguous() const;
+    bool is_contiguous(size_t n) const;
+    bool is_reserve_contiguous() const;
+    bool is_reserve_contiguous(size_t n) const;
+    void reserve_contiguous(size_t data_size);
+
 protected:
     int _cut_by_char(IOBuf* out, char);
     int _cut_by_delim(IOBuf* out, char const* dbegin, size_t ndelim);
@@ -426,6 +436,8 @@ private:
         BigView _bv;
         SmallView _sv;
     };
+
+    Block* get_block();
 };
 
 std::ostream& operator<<(std::ostream&, const IOBuf& buf);
@@ -467,7 +479,7 @@ public:
     // Read as many bytes as possible from SSL channel `ssl', and stop until `max_count'.
     // Returns total bytes read and the ssl error code will be filled into `ssl_error'
     ssize_t append_from_SSL_channel(struct ssl_st* ssl, int* ssl_error,
-                                    size_t max_count = 1024*1024);
+                                    size_t max_count = 1024 * 1024);
 
     // Remove all data inside and return cached blocks.
     void clear();
@@ -578,7 +590,7 @@ class IOBufAsZeroCopyOutputStream
 public:
     explicit IOBufAsZeroCopyOutputStream(IOBuf*);
     IOBufAsZeroCopyOutputStream(IOBuf*, uint32_t block_size);
-    ~IOBufAsZeroCopyOutputStream();
+    ~IOBufAsZeroCopyOutputStream() override;
 
     bool Next(void** data, int* size) override;
     void BackUp(int count) override; // `count' can be as long as ByteCount()
@@ -598,7 +610,6 @@ class IOBufAsSnappySource : public butil::snappy::Source {
 public:
     explicit IOBufAsSnappySource(const butil::IOBuf& buf)
         : _buf(&buf), _stream(buf) {}
-    virtual ~IOBufAsSnappySource() {}
 
     // Return the number of bytes left to read from the source
     size_t Available() const override;
@@ -619,7 +630,6 @@ private:
 class IOBufAsSnappySink : public butil::snappy::Sink {
 public:
     explicit IOBufAsSnappySink(butil::IOBuf& buf);
-    virtual ~IOBufAsSnappySink() {}
 
     // Append "bytes[0,n-1]" to this.
     void Append(const char* bytes, size_t n) override;
