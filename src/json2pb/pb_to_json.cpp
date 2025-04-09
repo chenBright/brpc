@@ -349,8 +349,8 @@ bool ProtoMessageToJson(const google::protobuf::Message& message,
 }
 
 bool ProtoMessageToProtoJson(const google::protobuf::Message& message,
-                        google::protobuf::io::ZeroCopyOutputStream* json,
-                        const Pb2ProtoJsonOptions& options, std::string* error) {
+                             google::protobuf::io::ZeroCopyOutputStream* json,
+                             const Pb2ProtoJsonOptions& options, std::string* error) {
     TypeResolverUniqueptr type_resolver = GetTypeResolver(message);
     butil::IOBuf buf;
     butil::IOBufAsZeroCopyOutputStream output_stream(&buf);

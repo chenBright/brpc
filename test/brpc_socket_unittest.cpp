@@ -421,6 +421,7 @@ TEST_F(SocketTest, single_threaded_connect_and_write) {
     ASSERT_EQ(-1, brpc::Socket::Address(id, &ptr));
 
     messenger->StopAccept(0);
+    messenger->Join();
     ASSERT_EQ(-1, messenger->listened_fd());
     ASSERT_EQ(-1, fcntl(listening_fd, F_GETFD));
     ASSERT_EQ(EBADF, errno);
@@ -789,6 +790,7 @@ TEST_F(SocketTest, health_check) {
     // Must stop messenger before SetFailed the id otherwise StartHealthCheck
     // still has chance to get reconnected and revive the id.
     messenger->StopAccept(0);
+    messenger->Join();
     ASSERT_EQ(-1, messenger->listened_fd());
     ASSERT_EQ(-1, fcntl(listening_fd, F_GETFD));
     ASSERT_EQ(EBADF, errno);
@@ -1408,6 +1410,7 @@ TEST_F(SocketTest, keepalive_input_message) {
     }
 
     messenger->StopAccept(0);
+    messenger->Join();
     ASSERT_EQ(-1, messenger->listened_fd());
     ASSERT_EQ(-1, fcntl(listening_fd, F_GETFD));
     ASSERT_EQ(EBADF, errno);
