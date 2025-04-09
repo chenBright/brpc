@@ -115,6 +115,7 @@ butil::static_atomic<int> g_running_server_count = BUTIL_STATIC_ATOMIC_INIT(0);
 // Following services may have security issues and are disabled by default.
 DEFINE_bool(enable_dir_service, false, "Enable /dir");
 DEFINE_bool(enable_threads_service, false, "Enable /threads");
+DEFINE_bool(enable_list_service, false, "Enable /list");
 
 DECLARE_int32(usercode_backup_threads);
 DECLARE_bool(usercode_in_pthread);
@@ -530,7 +531,8 @@ int Server::AddBuiltinServices() {
         LOG(ERROR) << "Fail to add BadMethodService";
         return -1;
     }
-    if (AddBuiltinService(new (std::nothrow) ListService(this))) {
+    if (FLAGS_enable_list_service &&
+        AddBuiltinService(new (std::nothrow) ListService(this))) {
         LOG(ERROR) << "Fail to add ListService";
         return -1;
     }
