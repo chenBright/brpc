@@ -23,26 +23,23 @@
 #include "butil/iobuf.h"                       // IOBuf
 #include "json2pb/pb_to_json.h"
 #include "json2pb/json_to_pb.h"
+#include "brpc/compress.h"
 
 
 namespace brpc {
 namespace policy {
 
+// Compress data from CompressCallback::Convert() into CompressCallback::Buffer().
+bool SnappyCompress(CompressCallback& callback);
+
+// Decompress data from DecompressCallback::Buffer() into DecompressCallback::Convert().
+bool SnappyDecompress(DecompressCallback& callback);
+
 // Compress serialized `msg' into `buf'.
 bool SnappyCompress(const google::protobuf::Message& msg, butil::IOBuf* buf);
-bool SnappyCompress2Json(const google::protobuf::Message& msg, butil::IOBuf* buf,
-                         const json2pb::Pb2JsonOptions& options);
-bool SnappyCompress2ProtoJson(const google::protobuf::Message& msg, butil::IOBuf* buf,
-                              const json2pb::Pb2ProtoJsonOptions& options);
-bool SnappyCompress2ProtoText(const google::protobuf::Message& msg, butil::IOBuf* buf);
 
 // Parse `msg' from decompressed `buf'
 bool SnappyDecompress(const butil::IOBuf& data, google::protobuf::Message* msg);
-bool SnappyDecompressFromJson(const butil::IOBuf& data, google::protobuf::Message* msg,
-                              const json2pb::Json2PbOptions& options);
-bool SnappyDecompressFromProtoJson(const butil::IOBuf& data, google::protobuf::Message* msg,
-                                   const json2pb::ProtoJson2PbOptions& options);
-bool SnappyDecompressFromProtoText(const butil::IOBuf& data, google::protobuf::Message* msg);
 
 // Put compressed `in' into `out'.
 bool SnappyCompress(const butil::IOBuf& in, butil::IOBuf* out);

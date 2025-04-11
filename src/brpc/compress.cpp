@@ -24,9 +24,7 @@
 namespace brpc {
 
 static const int MAX_HANDLER_SIZE = 1024;
-static CompressHandler s_handler_map[MAX_HANDLER_SIZE] = {
-    { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL }
-};
+static CompressHandler s_handler_map[MAX_HANDLER_SIZE] = { { NULL, NULL, NULL } };
 
 int RegisterCompressHandler(CompressType type, 
                             CompressHandler handler) {
@@ -85,10 +83,11 @@ bool ParseFromCompressedData(const butil::IOBuf& data,
         return ParsePbFromIOBuf(msg, data);
     }
     const CompressHandler* handler = FindCompressHandler(compress_type);
-    if (NULL != handler) {
-        return handler->Decompress(data, msg);
+    if (NULL == handler) {
+        return false;
     }
-    return false;
+    PBDecompressCallback callback(data, msg);
+    return handler->Decompress(callback);
 }
 
 bool SerializeAsCompressedData(const google::protobuf::Message& msg,
@@ -98,10 +97,11 @@ bool SerializeAsCompressedData(const google::protobuf::Message& msg,
         return msg.SerializeToZeroCopyStream(&wrapper);
     }
     const CompressHandler* handler = FindCompressHandler(compress_type);
-    if (NULL != handler) {
-        return handler->Compress(msg, buf);
+    if (NULL == handler) {
+        return false;
     }
-    return false;
+    PBCompressCallback callback(msg, buf);
+    return handler->Compress(callback);
 }
 
 } // namespace brpc

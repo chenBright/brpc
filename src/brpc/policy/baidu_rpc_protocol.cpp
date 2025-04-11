@@ -140,59 +140,119 @@ ParseResult ParseRpcMessage(butil::IOBuf* source, Socket* socket,
     return MakeMessage(msg);
 }
 
-static json2pb::Pb2JsonOptions MakePb2JsonOptions(Controller& cntl) {
-    json2pb::Pb2JsonOptions options;
-    options.bytes_to_base64 = cntl.has_pb_bytes_to_base64();
-    options.jsonify_empty_array = cntl.has_pb_jsonify_empty_array();
-    options.always_print_primitive_fields = cntl.has_always_print_primitive_fields();
-    options.single_repeated_to_array = cntl.has_pb_single_repeated_to_array();
-    options.enum_option = FLAGS_pb_enum_as_number
-                          ? json2pb::OUTPUT_ENUM_BY_NUMBER
-                          : json2pb::OUTPUT_ENUM_BY_NAME;
-    return options;
-}
+// CompressCallback for Json.
+class JsonCompressCallback : public CompressCallback {
+public:
+    JsonCompressCallback(const google::protobuf::Message& msg,
+                         const Controller& cntl, butil::IOBuf* buf)
+        : _msg(msg), _cntl(cntl), _buf(buf) {}
+
+    bool Convert(google::protobuf::io::ZeroCopyOutputStream* output) override {
+        json2pb::Pb2JsonOptions options;
+        options.bytes_to_base64 = _cntl.has_pb_bytes_to_base64();
+        options.jsonify_empty_array = _cntl.has_pb_jsonify_empty_array();
+        options.always_print_primitive_fields = _cntl.has_always_print_primitive_fields();
+        options.single_repeated_to_array = _cntl.has_pb_single_repeated_to_array();
+        options.enum_option = FLAGS_pb_enum_as_number
+                              ? json2pb::OUTPUT_ENUM_BY_NUMBER
+                              : json2pb::OUTPUT_ENUM_BY_NAME;
+        std::string error;
+        bool ok = json2pb::ProtoMessageToJson(_msg, output, options, &error);
+        if (!ok && !error.empty()) {
+            append_error(error);
+        }
+        return ok;
+    }
+
+    butil::IOBuf& Buffer() override { return *_buf; }
+
+private:
+    const google::protobuf::Message& _msg;
+    const Controller& _cntl;
+    butil::IOBuf* _buf;
+};
+
+// CompressCallback for Proto Json.
+class ProtoJsonCompressCallback : public CompressCallback {
+public:
+    ProtoJsonCompressCallback(const google::protobuf::Message& msg,
+                              const Controller& cntl, butil::IOBuf* buf)
+        : _msg(msg), _cntl(cntl), _buf(buf) {}
+
+    bool Convert(google::protobuf::io::ZeroCopyOutputStream* output) override {
+        json2pb::Pb2ProtoJsonOptions options;
+        options.always_print_enums_as_ints = FLAGS_pb_enum_as_number;
+        AlwaysPrintPrimitiveFields(options) = _cntl.has_always_print_primitive_fields();
+        std::string error;
+        bool ok = json2pb::ProtoMessageToProtoJson(_msg, output, options, &error);
+        if (!ok && !error.empty()) {
+            append_error(error);
+        }
+        return ok;
+    }
+
+    butil::IOBuf& Buffer() override { return *_buf; }
+
+private:
+    const google::protobuf::Message& _msg;
+    const Controller& _cntl;
+    butil::IOBuf* _buf;
+};
+
+// CompressCallback for Proto Text.
+class ProtoTextCompressCallback : public CompressCallback {
+public:
+    ProtoTextCompressCallback(const google::protobuf::Message& msg, butil::IOBuf* buf)
+        : _msg(msg), _buf(buf) {}
+
+    bool Convert(google::protobuf::io::ZeroCopyOutputStream* output) override {
+        return google::protobuf::TextFormat::Print(_msg, output);
+    }
+
+    butil::IOBuf& Buffer() override { return *_buf; }
+private:
+    const google::protobuf::Message& _msg;
+    butil::IOBuf* _buf;
+};
 
 bool SerializeRpcMessage(const google::protobuf::Message& message,
                          Controller& cntl, ContentType content_type,
                          CompressType compress_type, butil::IOBuf* buf,
                          std::string* error) {
-    if (COMPRESS_TYPE_NONE == compress_type) {
-        butil::IOBufAsZeroCopyOutputStream wrapper(buf);
-        if (CONTENT_TYPE_PB == content_type) {
-            return message.SerializeToZeroCopyStream(&wrapper);
-        } else if (CONTENT_TYPE_JSON == content_type ) {
-            json2pb::Pb2JsonOptions options = MakePb2JsonOptions(cntl);
-            return json2pb::ProtoMessageToJson(message, &wrapper, options, error);
-        } else if (CONTENT_TYPE_PROTO_JSON == content_type) {
-            json2pb::Pb2ProtoJsonOptions options;
-            AlwaysPrintPrimitiveFields(options) = cntl.has_always_print_primitive_fields();
-            return json2pb::ProtoMessageToProtoJson(message, &wrapper, options, error);
-        } else if (CONTENT_TYPE_PROTO_TEXT == content_type) {
-            return google::protobuf::TextFormat::Print(message, &wrapper);
+    auto serialize = [&](CompressCallback& callback) -> bool {
+        bool ok;
+        if (COMPRESS_TYPE_NONE == compress_type) {
+            butil::IOBufAsZeroCopyOutputStream wrapper(&callback.Buffer());
+            ok = callback.Convert(&wrapper);
+        } else {
+            const CompressHandler* handler = FindCompressHandler(compress_type);
+            if (NULL == handler) {
+                *error = "Unsupported compress type";
+                return false;
+            }
+            ok = handler->Compress(callback);
         }
-        return false;
-    }
+        if (!ok) {
+            error->append(callback.get_error());
+        }
+        return ok;
+    };
 
-    const CompressHandler* handler = FindCompressHandler(compress_type);
-    if (NULL == handler) {
-        return false;
-    }
     if (CONTENT_TYPE_PB == content_type) {
-        return handler->Compress(message, buf);
-    }
-    butil::IOBufAsZeroCopyOutputStream wrapper(buf);
-    if (CONTENT_TYPE_JSON == content_type) {
-        json2pb::Pb2JsonOptions options = MakePb2JsonOptions(cntl);
-        return handler->Compress2Json(message, buf, options);
+        PBCompressCallback callback(message, buf);
+        return serialize(callback);
+    } else if (CONTENT_TYPE_JSON == content_type) {
+        JsonCompressCallback callback(message, cntl, buf);
+        return serialize(callback);
     } else if (CONTENT_TYPE_PROTO_JSON == content_type) {
-        json2pb::Pb2ProtoJsonOptions options;
-        options.always_print_enums_as_ints = FLAGS_pb_enum_as_number;
-        AlwaysPrintPrimitiveFields(options) = cntl.has_always_print_primitive_fields();
-        return handler->Compress2ProtoJson(message, buf, options);
+        ProtoJsonCompressCallback callback(message, cntl, buf);
+        return serialize(callback);
     } else if (CONTENT_TYPE_PROTO_TEXT == content_type) {
-        return handler->Compress2ProtoText(message, buf);
+        ProtoTextCompressCallback callback(message, buf);
+        return serialize(callback);
     }
 
+    *error = "Unsupported content type";
     return false;
 }
 
@@ -204,8 +264,7 @@ static bool SerializeResponse(const google::protobuf::Message& res,
     }
 
     if (!res.IsInitialized()) {
-        cntl.SetFailed(ERESPONSE,
-                       "Missing required fields in response: %s",
+        cntl.SetFailed(ERESPONSE, "Missing required fields in response: %s",
                        res.InitializationErrorString().c_str());
         return false;
     }
@@ -216,9 +275,10 @@ static bool SerializeResponse(const google::protobuf::Message& res,
     if (!SerializeRpcMessage(res, cntl, content_type,
                              compress_type, &buf, &error)) {
         cntl.SetFailed(ERESPONSE, "Fail to serialize response, "
-                                  "ContentType=%s, CompressType=%s",
+                                  "ContentType=%s, CompressType=%s : %s",
                        ContentTypeToCStr(content_type),
-                       CompressTypeToCStr(compress_type));
+                       CompressTypeToCStr(compress_type),
+                       error.c_str());
         return false;
     }
     return true;
@@ -473,49 +533,99 @@ void EndRunningCallMethodInPool(
     return EndRunningUserCodeInPool(CallMethodInBackupThread, args);
 };
 
+// DecompressCallback for Json.
+class JsonDecompressCallback : public DecompressCallback {
+public:
+    JsonDecompressCallback(const butil::IOBuf& buf, const Controller& cntl,
+                           google::protobuf::Message* msg)
+        : _buf(buf), _cntl(cntl), _msg(msg) {}
+
+    bool Convert(google::protobuf::io::ZeroCopyInputStream* input) override {
+        json2pb::Json2PbOptions options;
+        options.base64_to_bytes = _cntl.has_pb_bytes_to_base64();
+        options.array_to_single_repeated = _cntl.has_pb_single_repeated_to_array();
+        std::string error;
+        return json2pb::JsonToProtoMessage(input, _msg, options, &error);
+    }
+
+    const butil::IOBuf& Buffer() override { return _buf; }
+private:
+    const butil::IOBuf& _buf;
+    const Controller& _cntl;
+    google::protobuf::Message* _msg;
+};
+
+// DecompressCallback for Proto Json.
+class ProtoJsonDecompressCallback : public DecompressCallback {
+public:
+    ProtoJsonDecompressCallback(const butil::IOBuf& buf, google::protobuf::Message* msg)
+        : _buf(buf), _msg(msg) {}
+
+    bool Convert(google::protobuf::io::ZeroCopyInputStream* input) override {
+        json2pb::ProtoJson2PbOptions options;
+        options.ignore_unknown_fields = true;
+        std::string error;
+        return json2pb::ProtoJsonToProtoMessage(input, _msg, options, &error);
+    }
+
+    const butil::IOBuf& Buffer() override { return _buf; }
+private:
+    const butil::IOBuf& _buf;
+    google::protobuf::Message* _msg;
+};
+
+// DecompressCallback for Proto Text.
+class ProtoTextDecompressCallback : public DecompressCallback {
+public:
+    ProtoTextDecompressCallback(const butil::IOBuf& buf, google::protobuf::Message* msg)
+        : _buf(buf), _msg(msg) {}
+
+    bool Convert(google::protobuf::io::ZeroCopyInputStream* input) override {
+        return google::protobuf::TextFormat::Parse(input, _msg);
+    }
+
+    const butil::IOBuf& Buffer() override { return _buf; }
+private:
+    const butil::IOBuf& _buf;
+    google::protobuf::Message* _msg;
+};
+
 bool DeserializeRpcMessage(const butil::IOBuf& data, Controller& cntl,
                            ContentType content_type, CompressType compress_type,
                            google::protobuf::Message* message, std::string* error) {
-    if (COMPRESS_TYPE_NONE != compress_type) {
-        const CompressHandler* handler = FindCompressHandler(compress_type);
-        if (NULL == handler) {
-            return false;
+    auto deserialize = [&](DecompressCallback& callback) -> bool {
+        bool ok;
+        if (COMPRESS_TYPE_NONE == compress_type) {
+            butil::IOBufAsZeroCopyInputStream wrapper(callback.Buffer());
+            ok = callback.Convert(&wrapper);
+        } else {
+            const CompressHandler* handler = FindCompressHandler(compress_type);
+            if (NULL == handler) {
+                *error = "Unsupported compress type";
+                return false;
+            }
+            ok = handler->Decompress(callback);
         }
-
-        if (CONTENT_TYPE_PB == content_type) {
-            return handler->Decompress(data, message);
-        } else if (CONTENT_TYPE_JSON == content_type) {
-            butil::IOBufAsZeroCopyInputStream wrapper(data);
-            json2pb::Json2PbOptions options;
-            options.base64_to_bytes = cntl.has_pb_bytes_to_base64();
-            options.array_to_single_repeated = cntl.has_pb_single_repeated_to_array();
-            return handler->DecompressFromJson(data, message, options);
-        } else if (CONTENT_TYPE_PROTO_JSON == content_type) {
-            json2pb::ProtoJson2PbOptions options;
-            options.ignore_unknown_fields = true;
-            return handler->DecompressFromProtoJson(data, message, options);
-        } else if (CONTENT_TYPE_PROTO_TEXT == content_type) {
-            return handler->DecompressFromProtoText(data, message);
+        if (!ok) {
+            error->append(callback.get_error());
         }
-        return false;
-    }
+        return ok;
+    };
 
-    butil::IOBufAsZeroCopyInputStream wrapper(data);
     if (CONTENT_TYPE_PB == content_type) {
-        return ParsePbFromZeroCopyStream(message, &wrapper);
+        PBDecompressCallback callback(data, message);
+        return deserialize(callback);
     } else if (CONTENT_TYPE_JSON == content_type) {
-        json2pb::Json2PbOptions options;
-        options.base64_to_bytes = cntl.has_pb_bytes_to_base64();
-        options.array_to_single_repeated = cntl.has_pb_single_repeated_to_array();
-        return json2pb::JsonToProtoMessage(&wrapper, message, options, error);
+        JsonDecompressCallback callback(data, cntl, message);
+        return deserialize(callback);
     } else if (CONTENT_TYPE_PROTO_JSON == content_type) {
-        json2pb::ProtoJson2PbOptions options;
-        options.ignore_unknown_fields = true;
-        return json2pb::ProtoJsonToProtoMessage(&wrapper, message, options, error);
+        ProtoJsonDecompressCallback callback(data, message);
+        return deserialize(callback);
     } else if (CONTENT_TYPE_PROTO_TEXT == content_type) {
-        return google::protobuf::TextFormat::Parse(&wrapper, message);
+        ProtoTextDecompressCallback callback(data, message);
+        return deserialize(callback);
     }
-
+    *error = "Unsupported content type";
     return false;
 }
 
@@ -970,9 +1080,10 @@ void SerializeRpcRequest(butil::IOBuf* request_buf, Controller* cntl,
     if (!SerializeRpcMessage(*request, *cntl, content_type,
                              compress_type, request_buf, &error)) {
         return cntl->SetFailed(EREQUEST, "Fail to compress request, "
-                                         "ContentType=%s, CompressType=%s",
+                                         "ContentType=%s, CompressType=%s : %s",
                                ContentTypeToCStr(content_type),
-                               CompressTypeToCStr(compress_type));
+                               CompressTypeToCStr(compress_type),
+                               error.c_str());
     }
 }
 

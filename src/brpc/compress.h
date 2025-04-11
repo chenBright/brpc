@@ -27,24 +27,51 @@
 
 namespace brpc {
 
-struct CompressHandler {
-    // Compress serialized `msg' into `buf'.
-    // Returns true on success, false otherwise
-    bool (*Compress)(const google::protobuf::Message& msg, butil::IOBuf* buf);
-    bool (*Compress2Json)(const google::protobuf::Message& msg, butil::IOBuf* buf,
-                          const json2pb::Pb2JsonOptions& options);
-    bool (*Compress2ProtoJson)(const google::protobuf::Message& msg, butil::IOBuf* buf,
-                               const json2pb::Pb2ProtoJsonOptions& options);
-    bool (*Compress2ProtoText)(const google::protobuf::Message& msg, butil::IOBuf* buf);
+// Base class for CompressCallback and DecompressCallback.
+class CompressBase {
+public:
+    void append_error(const std::string& error) {
+        if (_error.empty()) {
+            _error = error;
+        } else {
+            _error.append(", ").append(error);
+        }
+    }
 
-    // Parse decompressed `data' as `msg'.
-    // Returns true on success, false otherwise
-    bool (*Decompress)(const butil::IOBuf& data, google::protobuf::Message* msg);
-    bool (*DecompressFromJson)(const butil::IOBuf& data, google::protobuf::Message* msg,
-                               const json2pb::Json2PbOptions& options);
-    bool (*DecompressFromProtoJson)(const butil::IOBuf& data, google::protobuf::Message* msg,
-                                    const json2pb::ProtoJson2PbOptions& options);
-    bool (*DecompressFromProtoText)(const butil::IOBuf& data, google::protobuf::Message* msg);
+    const std::string& get_error() const {
+        return _error;
+    }
+protected:
+    // Error messages.
+    std::string _error;
+};
+
+// CompressCallback provides raw data for compression,
+// and a buffer for storing compressed data.
+class CompressCallback : public CompressBase {
+public:
+    // Converts the data into `output' for later compression.
+    virtual bool Convert(google::protobuf::io::ZeroCopyOutputStream* output) = 0;
+    // Returns the buffer for storing compressed data.
+    virtual butil::IOBuf& Buffer() = 0;
+};
+
+// DecompressCallback provides raw data stored in a buffer for decompression,
+// and handles the decompressed data.
+class DecompressCallback : public CompressBase {
+public:
+    // Converts the decompressed `input'.
+    virtual bool Convert(google::protobuf::io::ZeroCopyInputStream* intput) = 0;
+    // Returns the buffer containing compressed data.
+    virtual const butil::IOBuf& Buffer() = 0;
+};
+
+struct CompressHandler {
+    // Compress data from CompressCallback::Convert() into CompressCallback::Buffer().
+    bool (*Compress)(CompressCallback& callback);
+
+    // Decompress data from DecompressCallback::Buffer() into DecompressCallback::Convert().
+    bool (*Decompress)(DecompressCallback& callback);
 
     // Name of the compression algorithm, must be string constant.
     const char* name;
@@ -62,6 +89,35 @@ const char* CompressTypeToCStr(CompressType type);
 
 // Put all registered handlers into `vec'.
 void ListCompressHandler(std::vector<CompressHandler>* vec);
+
+// CompressCallback for Protobuf messages.
+class PBCompressCallback : public CompressCallback {
+public:
+    PBCompressCallback(const google::protobuf::Message& msg, butil::IOBuf* buf)
+        : _msg(msg), _buf(buf) {}
+    bool Convert(google::protobuf::io::ZeroCopyOutputStream* output) override {
+        return _msg.SerializeToZeroCopyStream(output);
+    }
+    butil::IOBuf& Buffer() override { return *_buf; }
+
+private:
+    const google::protobuf::Message& _msg;
+    butil::IOBuf* _buf;
+};
+
+// DecompressCallback for Protobuf messages.
+class PBDecompressCallback : public DecompressCallback {
+public:
+    PBDecompressCallback(const butil::IOBuf& buf, google::protobuf::Message* msg) : _buf(buf), _msg(msg) {}
+    bool Convert(google::protobuf::io::ZeroCopyInputStream* input) override {
+        return _msg->ParseFromZeroCopyStream(input);
+    }
+    const butil::IOBuf& Buffer() override { return _buf; }
+
+private:
+    const butil::IOBuf& _buf;
+    google::protobuf::Message* _msg;
+};
 
 // Parse decompressed `data' as `msg' using registered `compress_type'.
 // Returns true on success, false otherwise
