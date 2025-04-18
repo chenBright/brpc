@@ -472,4 +472,48 @@ namespace {  /*anonymous namespace */                           \
         }                                                                           \
     } while (false)
 
+#if BUTIL_HAVE_ATTRIBUTE(lockable)
+#define BUTIL_LOCKABLE __attribute__((lockable))
+#else
+#define BUTIL_LOCKABLE
+#endif
+
+#if BUTIL_HAVE_ATTRIBUTE(lock_returned)
+#define BUTIL_LOCK_RETURNED(x) __attribute__((lock_returned(x)))
+#else
+#define BUTIL_LOCK_RETURNED(x)
+#endif
+
+#if BUTIL_HAVE_ATTRIBUTE(guarded_by)
+#define BUTIL_GUARDED_BY(x) __attribute__((guarded_by(x)))
+#else
+#define BUTIL_GUARDED_BY(x)
+#endif
+
+#if BUTIL_HAVE_ATTRIBUTE(pt_guarded_by)
+#define BUTIL_PT_GUARDED_BY(x) __attribute__((pt_guarded_by(x)))
+#else
+#define BUTIL_PT_GUARDED_BY(x)
+#endif
+
+#if BUTIL_HAVE_ATTRIBUTE(exclusive_lock_function)
+#define BUTIL_EXCLUSIVE_LOCK_FUNCTION(...) \
+  __attribute__((exclusive_lock_function(__VA_ARGS__)))
+#else
+#define BUTIL_EXCLUSIVE_LOCK_FUNCTION(...)
+#endif
+
+#if BUTIL_HAVE_ATTRIBUTE(exclusive_trylock_function)
+#define BUTIL_EXCLUSIVE_TRYLOCK_FUNCTION(...) \
+  __attribute__((exclusive_trylock_function(__VA_ARGS__)))
+#else
+#define BUTIL_EXCLUSIVE_TRYLOCK_FUNCTION(...)
+#endif
+
+#if BUTIL_HAVE_ATTRIBUTE(unlock_function)
+#define BUTIL_UNLOCK_FUNCTION(...) __attribute__((unlock_function(__VA_ARGS__)))
+#else
+#define BUTIL_UNLOCK_FUNCTION(...)
+#endif
+
 #endif  // BUTIL_MACROS_H_

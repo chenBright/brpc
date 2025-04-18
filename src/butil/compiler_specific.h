@@ -199,13 +199,20 @@
 #define WARN_UNUSED_RESULT
 #endif
 
-// Compiler feature-detection.
+// Compiler feature detection.
 // clang.llvm.org/docs/LanguageExtensions.html#has-feature-and-has-extension
 #if defined(__has_feature)
 #define BUTIL_HAS_FEATURE(FEATURE) __has_feature(FEATURE)
 #else
 #define BUTIL_HAS_FEATURE(FEATURE) 0
 #endif
+
+// Compiler attribute detection.
+#if defined(__has_attribute)
+#define BUTIL_HAVE_ATTRIBUTE(x) __has_attribute(x)
+#else
+#define BUTIL_HAVE_ATTRIBUTE(x) 0
+#endif // __has_attribute
 
 // Instruct ASan is enabled.
 #if defined(BUTIL_USE_ASAN)

@@ -43,7 +43,7 @@ namespace bthread {
 // The C++ Wrapper of bthread_mutex
 
 // NOTE: Not aligned to cacheline as the container of Mutex is practically aligned
-class Mutex {
+class BUTIL_LOCKABLE Mutex {
 public:
     typedef bthread_mutex_t* native_handler_type;
     Mutex() {
@@ -55,16 +55,18 @@ public:
     }
     ~Mutex() { CHECK_EQ(0, bthread_mutex_destroy(&_mutex)); }
     native_handler_type native_handler() { return &_mutex; }
-    void lock() {
+    void lock() BUTIL_EXCLUSIVE_LOCK_FUNCTION() {
         int ec = bthread_mutex_lock(&_mutex);
         if (ec != 0) {
             throw std::system_error(std::error_code(ec, std::system_category()),
                                     "Mutex lock failed");
         }
     }
-    void unlock() { bthread_mutex_unlock(&_mutex); }
-    bool try_lock() { return 0 == bthread_mutex_trylock(&_mutex); }
-    bool timed_lock(const struct timespec* abstime) {
+    void unlock() BUTIL_UNLOCK_FUNCTION() { bthread_mutex_unlock(&_mutex); }
+    bool try_lock() BUTIL_EXCLUSIVE_TRYLOCK_FUNCTION(true) {
+        return 0 == bthread_mutex_trylock(&_mutex);
+    }
+    bool timed_lock(const struct timespec* abstime) BUTIL_EXCLUSIVE_TRYLOCK_FUNCTION(true) {
         return !bthread_mutex_timedlock(&_mutex, abstime);
     }
     // TODO(chenzhangyi01): Complement interfaces for C++11
