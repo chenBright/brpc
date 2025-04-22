@@ -18,29 +18,29 @@ jobs:
     runs-on: ubuntu-22.04 # https://github.com/actions/runner-images
     steps:
     - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependences
+    - uses: ./.github/actions/install-essential-dependencies
     - uses: ./.github/actions/init-make-config
       with:
         options: --cc=gcc --cxx=g++ --werror
     - name: compile
       run: |
-           make -j ${{env.proc_num}}
+        make -j ${{env.proc_num}}
 
   gcc-compile-with-cmake:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependences
+    - uses: ./.github/actions/install-essential-dependencies
     - name: cmake
       run: |
-           export CC=gcc && export CXX=g++
-           mkdir build
-           cd build
-           cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
+        export CC=gcc && export CXX=g++
+        mkdir build
+        cd build
+        cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
     - name: compile
       run: |
-           cd build
-           make -j ${{env.proc_num}}
+        cd build
+        make -j ${{env.proc_num}}
 
   gcc-compile-with-bazel:
     runs-on: ubuntu-22.04
@@ -61,7 +61,7 @@ jobs:
     - uses: ./.github/actions/install-all-dependences
     - uses: ./.github/actions/init-make-config
       with:
-       options: --cc=gcc --cxx=g++ --with-thrift --with-glog --with-rdma  --with-debug-bthread-sche-safety --with-debug-lock --with-bthread-tracer --werror --with-asan
+        options: --cc=gcc --cxx=g++ --with-thrift --with-glog --with-rdma  --with-debug-bthread-sche-safety --with-debug-lock --with-bthread-tracer --werror --with-asan
     - name: compile
       run: |
         make -j ${{env.proc_num}}
@@ -73,48 +73,49 @@ jobs:
     - uses: ./.github/actions/install-all-dependences
     - name: cmake
       run: |
-           export CC=gcc && export CXX=g++
-           mkdir build
-           cd build
-           cmake -DWITH_MESALINK=OFF -DWITH_GLOG=ON -DWITH_THRIFT=ON -DWITH_RDMA=ON -DWITH_DEBUG_BTHREAD_SCHE_SAFETY=ON -DWITH_DEBUG_LOCK=ON -DWITH_BTHREAD_TRACER=ON -DWITH_ASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
+        export CC=gcc && export CXX=g++
+        mkdir build
+        cd build
+        cmake -DWITH_MESALINK=OFF -DWITH_GLOG=ON -DWITH_THRIFT=ON -DWITH_RDMA=ON -DWITH_DEBUG_BTHREAD_SCHE_SAFETY=ON -DWITH_DEBUG_LOCK=ON -DWITH_BTHREAD_TRACER=ON -DWITH_ASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
     - name: compile
       run: |
-           cd build
-           make -j ${{env.proc_num}}
+        cd build
+        make -j ${{env.proc_num}}
 
   gcc-compile-with-bazel-all-options:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true -- //... -//example/...
+      - uses: actions/checkout@v2
+      - run: bazel build --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true -- //... -//example/...
+
 
   clang-compile-with-make:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependences
+    - uses: ./.github/actions/install-essential-dependencies
     - uses: ./.github/actions/init-make-config
       with:
         options: --cc=clang --cxx=clang++ --werror
     - name: compile
       run: |
-           make -j ${{env.proc_num}}
+        make -j ${{env.proc_num}}
 
   clang-compile-with-cmake:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependences
+    - uses: ./.github/actions/install-essential-dependencies
     - name: cmake
       run: |
-           export CC=clang && export CXX=clang++
-           mkdir build
-           cd build
-           cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
+        export CC=clang && export CXX=clang++
+        mkdir build
+        cd build
+        cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
     - name: compile
       run: |
-           cd build
-           make -j ${{env.proc_num}}
+        cd build
+        make -j ${{env.proc_num}}
 
   clang-compile-with-bazel:
     runs-on: ubuntu-22.04
@@ -135,10 +136,10 @@ jobs:
     - uses: ./.github/actions/install-all-dependences
     - uses: ./.github/actions/init-make-config
       with:
-        options: --cc=clang --cxx=clang++ --with-thrift --with-glog --with-rdma  --with-debug-bthread-sche-safety --with-debug-lock --with-bthread-tracer --werror --with-asan
+          options: --cc=clang --cxx=clang++ --with-thrift --with-glog --with-rdma  --with-debug-bthread-sche-safety --with-debug-lock --with-bthread-tracer --werror --with-asan
     - name: compile
       run: |
-           make -j ${{env.proc_num}}
+        make -j ${{env.proc_num}}
 
   clang-compile-with-cmake-all-options:
     runs-on: ubuntu-22.04
@@ -147,53 +148,53 @@ jobs:
     - uses: ./.github/actions/install-all-dependences
     - name: cmake
       run: |
-           export CC=clang && export CXX=clang++
-           mkdir build
-           cd build
-           cmake -DWITH_MESALINK=OFF -DWITH_GLOG=ON -DWITH_THRIFT=ON -DWITH_RDMA=ON -DWITH_DEBUG_BTHREAD_SCHE_SAFETY=ON -DWITH_DEBUG_LOCK=ON -DWITH_BTHREAD_TRACER=ON -DWITH_ASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
+        export CC=clang && export CXX=clang++
+        mkdir build
+        cd build
+        cmake -DWITH_MESALINK=OFF -DWITH_GLOG=ON -DWITH_THRIFT=ON -DWITH_RDMA=ON -DWITH_DEBUG_BTHREAD_SCHE_SAFETY=ON -DWITH_DEBUG_LOCK=ON -DWITH_BTHREAD_TRACER=ON -DWITH_ASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
     - name: compile
       run: |
-           cd build
-           make -j ${{env.proc_num}}
+        cd build
+        make -j ${{env.proc_num}}
 
   clang-compile-with-bazel-all-options:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true -- //... -//example/...
+      - uses: actions/checkout@v2
+      - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true -- //... -//example/...
 
   clang-unittest:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: ./.github/actions/install-essential-dependences
-      - uses: ./.github/actions/init-ut-make-config
-        with:
-          options: --cc=clang-12 --cxx=clang++-12 --with-bthread-tracer
-      - name: compile tests
-        run: |
-          cat config.mk
-          cd test
-          make -j ${{env.proc_num}}
-      - name: run tests
-        run: |
-          cd test
-          sh ./run_tests.sh
+    - uses: actions/checkout@v2
+    - uses: ./.github/actions/install-essential-dependencies
+    - uses: ./.github/actions/init-ut-make-config
+      with:
+        options: --cc=clang-12 --cxx=clang++-12 --with-bthread-tracer
+    - name: compile tests
+      run: |
+        cat config.mk
+         cd test
+         make -j ${{env.proc_num}}
+    - name: run tests
+      run: |
+        cd test
+        sh ./run_tests.sh
 
   clang-unittest-asan:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: ./.github/actions/install-essential-dependences
-      - uses: ./.github/actions/init-ut-make-config
-        with:
-          options: --cc=clang-12 --cxx=clang++-12 --with-bthread-tracer --with-asan
-      - name: compile tests
-        run: |
-          cat config.mk
-          cd test
-          make NEED_GPERFTOOLS=0 -j ${{env.proc_num}}
-      - name: run tests
-        run: |
-          cd test
-          sh ./run_tests.sh
+    - uses: actions/checkout@v2
+    - uses: ./.github/actions/install-essential-dependencies
+    - uses: ./.github/actions/init-ut-make-config
+      with:
+        options: --cc=clang-12 --cxx=clang++-12 --with-bthread-tracer --with-asan
+    - name: compile tests
+      run: |
+        cat config.mk
+        cd test
+        make NEED_GPERFTOOLS=0 -j ${{env.proc_num}}
+    - name: run tests
+      run: |
+        cd test
+        sh ./run_tests.sh

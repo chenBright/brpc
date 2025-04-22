@@ -1,0 +1,18 @@
+inputs:
+  protobuf-version:
+    description: version of protobuf
+    required: true
+  protobuf-cpp-version:
+    description: version of protobuf-cpp
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - run: ulimit -c unlimited -S && sudo bash -c "echo 'core.%e.%p' > /proc/sys/kernel/core_pattern"
+      shell: bash
+    - run: sudo apt-get install -y git g++ make libssl-dev libgflags-dev libleveldb-dev
+      shell: bash
+    - run: wget https://github.com/protocolbuffers/protobuf/releases/download/v${{inputs.protobuf-version}}/protobuf-cpp-${{inputs.protobuf-cpp-version}}.tar.gz && tar -xf protobuf-cpp-${{inputs.protobuf-cpp-version}}.tar.gz
+      shell: bash
+    - run: cd protobuf-${{inputs.protobuf-cpp-version}} && ./configure --prefix=/usr --with-pic && make -j $(nproc) && sudo make install
+      shell: bash
