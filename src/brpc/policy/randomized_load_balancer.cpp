@@ -25,14 +25,6 @@
 namespace brpc {
 namespace policy {
 
-const uint32_t prime_offset[] = {
-#include "bthread/offset_inl.list"
-};
-
-inline uint32_t GenRandomStride() {
-    return prime_offset[butil::fast_rand_less_than(ARRAY_SIZE(prime_offset))];
-}
-
 bool RandomizedLoadBalancer::Add(Servers& bg, const ServerId& id) {
     if (bg.server_list.capacity() < 128) {
         bg.server_list.reserve(128);
@@ -100,7 +92,8 @@ size_t RandomizedLoadBalancer::RemoveServersInBatch(
     return n;
 }
 
-int RandomizedLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
+int RandomizedLoadBalancer::SelectServerWithClusterRecoverPolicy(const SelectIn& in,
+                                                                 SelectOut* out) {
     butil::DoublyBufferedData<Servers>::ScopedPtr s;
     if (_db_servers.Read(&s) != 0) {
         return ENOMEM;
@@ -119,7 +112,7 @@ int RandomizedLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
     for (size_t i = 0; i < n; ++i) {
         const SocketId id = s->server_list[offset].id;
         if (((i + 1) == n  // always take last chance
-             || !ExcludedServers::IsExcluded(in.excluded, id))
+            || !ExcludedServers::IsExcluded(in.excluded, id))
             && Socket::Address(id, out->ptr) == 0
             && (*out->ptr)->IsAvailable()) {
             // We found an available server
@@ -138,6 +131,68 @@ int RandomizedLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
     // After we traversed the whole server list, there is still no
     // available server
     return EHOSTDOWN;
+}
+
+int RandomizedLoadBalancer::SelectServerWithPanicPolicy(const SelectIn& in,
+                                                        SelectOut* out) {
+    butil::DoublyBufferedData<Servers>::ScopedPtr s;
+    if (_db_servers.Read(&s) != 0) {
+        return ENOMEM;
+    }
+    size_t n = s->server_list.size();
+    if (n == 0) {
+        return ENODATA;
+    }
+
+    brpc::SocketUniquePtr ptr;
+    brpc::SocketUniquePtr panic_ptr;
+    uint32_t stride = 0;
+    size_t offset = butil::fast_rand_less_than(n);
+    for (size_t i = 0; i < n; ++i) {
+        const SocketId id = s->server_list[offset].id;
+        int rc = Socket::AddressFailedAsWell(id, &ptr);
+        if (-1 == rc || !ptr->IsAvailable()) {
+            continue;
+        }
+
+        // Store a panic server.
+        if (NULL == panic_ptr) {
+            ptr->ReAddress(&panic_ptr);
+        }
+        if (ExcludedServers::IsExcluded(in.excluded, id)) {
+            continue;
+        }
+        if (!ptr->Failed()) {
+            // An available server is found.
+            *out->ptr = std::move(panic_ptr);
+            return 0;
+        }
+
+        if (stride == 0) {
+            stride = GenRandomStride();
+        }
+        // Use `offset+stride' to retry so that
+        // this failed server won't be visited again.
+        offset = (offset + stride) % n;
+    }
+
+    // After traversing the whole server list, no available server is found.
+
+    // Use the panic server if it has been stored in `out->ptr'.
+    if (NULL != panic_ptr) {
+        *out->ptr = std::move(panic_ptr);
+        return 0;
+    }
+    // All servers are log off.
+    return EHOSTDOWN;
+}
+
+int RandomizedLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
+    if (NULL == _cluster_recover_policy) {
+        return SelectServerWithPanicPolicy(in, out);
+    } else {
+        return SelectServerWithClusterRecoverPolicy(in, out);
+    }
 }
 
 RandomizedLoadBalancer* RandomizedLoadBalancer::New(

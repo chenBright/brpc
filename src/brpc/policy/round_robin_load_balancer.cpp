@@ -25,14 +25,6 @@
 namespace brpc {
 namespace policy {
 
-const uint32_t prime_offset[] = {
-#include "bthread/offset_inl.list"
-};
-
-inline uint32_t GenRandomStride() {
-    return prime_offset[butil::fast_rand_less_than(ARRAY_SIZE(prime_offset))];
-}
-
 bool RoundRobinLoadBalancer::Add(Servers& bg, const ServerId& id) {
     if (bg.server_list.capacity() < 128) {
         bg.server_list.reserve(128);
@@ -100,7 +92,8 @@ size_t RoundRobinLoadBalancer::RemoveServersInBatch(
     return n;
 }
 
-int RoundRobinLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
+int RoundRobinLoadBalancer::SelectServerWithClusterRecoverPolicy(const SelectIn& in,
+                                                                 SelectOut* out) {
     butil::DoublyBufferedData<Servers, TLS>::ScopedPtr s;
     if (_db_servers.Read(&s) != 0) {
         return ENOMEM;
@@ -126,7 +119,7 @@ int RoundRobinLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
         tls.offset = (tls.offset + tls.stride) % n;
         const SocketId id = s->server_list[tls.offset].id;
         if (((i + 1) == n  // always take last chance
-             || !ExcludedServers::IsExcluded(in.excluded, id))
+            || !ExcludedServers::IsExcluded(in.excluded, id))
             && Socket::Address(id, out->ptr) == 0
             && (*out->ptr)->IsAvailable()) {
             s.tls() = tls;
@@ -138,6 +131,71 @@ int RoundRobinLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
     }
     s.tls() = tls;
     return EHOSTDOWN;
+}
+
+int RoundRobinLoadBalancer::SelectServerWithPanicPolicy(const SelectIn& in,
+                                                        SelectOut* out) {
+    butil::DoublyBufferedData<Servers, TLS>::ScopedPtr s;
+    if (_db_servers.Read(&s) != 0) {
+        return ENOMEM;
+    }
+    const size_t n = s->server_list.size();
+    if (n == 0) {
+        return ENODATA;
+    }
+
+    TLS tls = s.tls();
+    if (tls.stride == 0) {
+        tls.stride = GenRandomStride();
+        // use random at first time, for the case of
+        // use rr lb every time in new thread
+        tls.offset = butil::fast_rand_less_than(n);
+    }
+
+    brpc::SocketUniquePtr ptr;
+    brpc::SocketUniquePtr panic_ptr;
+    for (size_t i = 0; i < n; ++i) {
+        tls.offset = (tls.offset + tls.stride) % n;
+        SocketId id = s->server_list[tls.offset].id;
+        int rc = Socket::AddressFailedAsWell(id, &ptr);
+        if (-1 == rc || !ptr->IsAvailable()) {
+            continue;
+        }
+
+        // Store a panic server.
+        if (NULL == panic_ptr) {
+            ptr->ReAddress(&panic_ptr);
+            s.tls() = tls;
+        }
+        if (ExcludedServers::IsExcluded(in.excluded, id)) {
+            continue;
+        }
+        if (!ptr->Failed()) {
+            // An available server is found.
+            *out->ptr = std::move(panic_ptr);
+            s.tls() = tls;
+            return 0;
+        }
+    }
+
+    // After traversing the whole server list, no available server is found.
+
+    // Use the panic server which has been stored in `out->ptr'.
+    if (NULL != panic_ptr) {
+        *out->ptr = std::move(panic_ptr);
+        return 0;
+    }
+    // All servers are log off.
+    s.tls() = tls;
+    return EHOSTDOWN;
+}
+
+int RoundRobinLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
+    if (NULL == _cluster_recover_policy) {
+        return SelectServerWithPanicPolicy(in, out);
+    } else {
+        return SelectServerWithClusterRecoverPolicy(in, out);
+    }
 }
 
 RoundRobinLoadBalancer* RoundRobinLoadBalancer::New(

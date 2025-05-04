@@ -125,7 +125,7 @@ public:
     void ReturnSocket(Socket* sock);
     
     // Get all pooled sockets inside.
-    void ListSockets(std::vector<SocketId>* list, size_t max_count);
+    void ListSockets(std::vector<SocketId>* out, size_t max_count);
     
 private:
     // options used to create this instance
@@ -196,7 +196,7 @@ public:
     butil::atomic<uint64_t> recent_error_count;
 
     explicit SharedPart(SocketId creator_socket_id);
-    ~SharedPart();
+    ~SharedPart() override;
 
     // Call this method every second (roughly)
     void UpdateStatsEverySecond(int64_t now_ms);
@@ -449,51 +449,7 @@ static const uint64_t AUTH_FLAG = (1ul << 32);
 
 Socket::Socket(Forbidden f)
     // must be even because Address() relies on evenness of version
-    : VersionedRefWithId<Socket>(f)
-    , _shared_part(NULL)
-    , _nevent(0)
-    , _keytable_pool(NULL)
-    , _fd(-1)
-    , _tos(0)
-    , _reset_fd_real_us(-1)
-    , _on_edge_triggered_events(NULL)
-    , _user(NULL)
-    , _conn(NULL)
-    , _preferred_index(-1)
-    , _hc_count(0)
-    , _last_msg_size(0)
-    , _avg_msg_size(0)
-    , _last_readtime_us(0)
-    , _parsing_context(NULL)
-    , _correlation_id(0)
-    , _health_check_interval_s(-1)
-    , _is_hc_related_ref_held(false)
-    , _hc_started(false)
-    , _ninprocess(1)
-    , _auth_flag_error(0)
-    , _auth_id(INVALID_BTHREAD_ID)
-    , _auth_context(NULL)
-    , _ssl_state(SSL_UNKNOWN)
-    , _ssl_session(NULL)
-    , _rdma_ep(NULL)
-    , _rdma_state(RDMA_OFF)
-    , _connection_type_for_progressive_read(CONNECTION_TYPE_UNKNOWN)
-    , _controller_released_socket(false)
-    , _overcrowded(false)
-    , _fail_me_at_server_stop(false)
-    , _logoff_flag(false)
-    , _error_code(0)
-    , _pipeline_q(NULL)
-    , _last_writetime_us(0)
-    , _unwritten_bytes(0)
-    , _epollout_butex(NULL)
-    , _write_head(NULL)
-    , _is_write_shutdown(false)
-    , _stream_set(NULL)
-    , _total_streams_unconsumed_size(0)
-    , _ninflight_app_health_check(0)
-    , _tcp_user_timeout_ms(-1)
-    , _http_request_method(HTTP_METHOD_GET) {
+    : VersionedRefWithId<Socket>(f) {
     CreateVarsOnce();
     pthread_mutex_init(&_id_wait_list_mutex, NULL);
     _epollout_butex = bthread::butex_create_checked<butil::atomic<int> >();
@@ -758,16 +714,13 @@ int Socket::OnCreated(const SocketOptions& options) {
     _ssl_state = (options.initial_ssl_ctx == NULL ? SSL_OFF : SSL_UNKNOWN);
     _ssl_session = NULL;
     _ssl_ctx = options.initial_ssl_ctx;
+    _connection_type = CONNECTION_TYPE_UNKNOWN;
+    _main_socket_mode = options.main_socket_mode;
 #if BRPC_WITH_RDMA
     CHECK(_rdma_ep == NULL);
     if (options.use_rdma) {
-        _rdma_ep = new (std::nothrow)rdma::RdmaEndpoint(this);
-        if (!_rdma_ep) {
-            const int saved_errno = errno;
-            PLOG(ERROR) << "Fail to create RdmaEndpoint";
-            SetFailed(saved_errno, "Fail to create RdmaEndpoint: %s",
-                         berror(saved_errno));
-            return -1;
+        if (!_main_socket_mode) {
+            _rdma_ep = new rdma::RdmaEndpoint(this);
         }
         _rdma_state = RDMA_UNKNOWN;
     } else {
@@ -916,13 +869,12 @@ void Socket::OnFailed(int error_code, const std::string& error_text) {
     // comes online.
     if (HCEnabled()) {
         bool expect = false;
-        if (_hc_started.compare_exchange_strong(expect,
-            true,
-            butil::memory_order_relaxed,
-            butil::memory_order_relaxed)) {
-            GetOrNewSharedPart()->circuit_breaker.MarkAsBroken();
-            StartHealthCheck(id(),
-                GetOrNewSharedPart()->circuit_breaker.isolation_duration_ms());
+        if (_hc_started.compare_exchange_strong(expect, true,
+                                                butil::memory_order_relaxed,
+                                                butil::memory_order_relaxed)) {
+            CircuitBreaker& circuit_breaker = GetOrNewSharedPart()->circuit_breaker;
+            circuit_breaker.MarkAsBroken();
+            StartHealthCheck(id(), circuit_breaker.isolation_duration_ms());
         } else {
             // No need to run 2 health checking at the same time.
             RPC_VLOG << "There is already a health checking running "
@@ -999,7 +951,16 @@ int Socket::WaitAndReset(int32_t expected_nref) {
             LOG(WARNING) << "SocketId=" << id() << " is already alive or recycled";
             return -1;
         }
+        // No need to do health checking.
+        if (!_is_hc_related_ref_held) {
+            RPC_VLOG << "Nobody holds a health-checking-related reference"
+                     << " for SocketId=" << id();
+            return -1;
+        }
         if (NRefOfVRef(vref) > expected_nref) {
+            if (_main_socket_mode) {
+                break;
+            }
             if (bthread_usleep(1000L/*FIXME*/) < 0) {
                 PLOG_IF(FATAL, errno != ESTOP) << "Fail to sleep";
                 return -1;
@@ -1009,14 +970,6 @@ int Socket::WaitAndReset(int32_t expected_nref) {
                      << " was abandoned during health checking";
             return -1;
         } else {
-            // nobody holds a health-checking-related reference,
-            // so no need to do health checking.
-            if (!_is_hc_related_ref_held) {
-                RPC_VLOG << "Nobody holds a health-checking-related reference"
-                         << " for SocketId=" << id();
-                return -1;
-            }
-
             break;
         }
     }
@@ -1629,6 +1582,11 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
     if (options_in) {
         opt = *options_in;
     }
+    if (_main_socket_mode) {
+        LOG(ERROR) << "Write() is not allowed in main socket mode";
+        return SetError(opt.id_wait, EINVAL);
+        return -1;
+    }
     if (data->empty()) {
         return SetError(opt.id_wait, EINVAL);
     }
@@ -1669,6 +1627,13 @@ int Socket::Write(SocketMessagePtr<>& msg, const WriteOptions* options_in) {
     if (options_in) {
         opt = *options_in;
     }
+
+    if (_main_socket_mode) {
+        LOG(ERROR) << "Write() is not allowed in main socket mode";
+        return SetError(opt.id_wait, EINVAL);
+        return -1;
+    }
+
     if (opt.pipelined_count > MAX_PIPELINED_COUNT) {
         LOG(ERROR) << "pipelined_count=" << opt.pipelined_count
                    << " is too large";
@@ -2378,7 +2343,9 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
            << "\n}";
     }
     const int fd = ptr->_fd.load(butil::memory_order_relaxed);
-    os << "\nnref=" << NRefOfVRef(vref) - 1
+    os << "\nconnection_type=" << ConnectionTypeToString(ptr->_connection_type)
+       << "\nmain_socket_mode=" << ptr->_main_socket_mode
+       << "\nnref=" << NRefOfVRef(vref) - 1
         //                                ^
         // minus the ref of current callsite(calling PrintSocket)
        << "\nnevent=" << ptr->_nevent.load(butil::memory_order_relaxed)
@@ -2660,6 +2627,7 @@ inline SocketPool::SocketPool(const SocketOptions& opt)
     , _remote_side(opt.remote_side)
     , _numfree(0)
     , _numinflight(0) {
+    _options.health_check_interval_s = -1;
 }
 
 inline SocketPool::~SocketPool() {
@@ -2710,9 +2678,7 @@ inline int SocketPool::GetSocket(SocketUniquePtr* ptr) {
         }
     }
     // Not found in pool
-    SocketOptions opt = _options;
-    opt.health_check_interval_s = -1;
-    if (get_client_side_messenger()->Create(opt, &sid) == 0 &&
+    if (get_client_side_messenger()->Create(_options, &sid) == 0 &&
         Socket::Address(sid, ptr) == 0) {
         _numinflight.fetch_add(1, butil::memory_order_relaxed);
         return 0;
@@ -2809,7 +2775,7 @@ int Socket::GetPooledSocket(SocketUniquePtr* pooled_socket) {
         opt.initial_ssl_ctx = _ssl_ctx;
         opt.keytable_pool = _keytable_pool;
         opt.app_connect = _app_connect;
-        opt.use_rdma =  (_rdma_ep) ? true : false;
+        opt.use_rdma =  RDMA_OFF != _rdma_state;
         socket_pool = new SocketPool(opt);
         SocketPool* expected = NULL;
         if (!main_sp->socket_pool.compare_exchange_strong(
@@ -2897,11 +2863,18 @@ bool Socket::GetPooledSocketStats(int* numfree, int* numinflight) {
     return true;
 }
     
-int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
-    if (short_socket == NULL) {
+int Socket::GetSubSocket(SocketUniquePtr* sub_socket) {
+    if (sub_socket == NULL) {
         LOG(ERROR) << "short_socket is NULL";
         return -1;
     }
+    if (CONNECTION_TYPE_UNKNOWN != _connection_type) {
+        LOG(ERROR) << "Do not allow get sub socket from " << *this
+                   << " which is already sub socket, "
+                      "connection_type=" << _connection_type;
+        return -1;
+    }
+
     SocketId id;
     SocketOptions opt;
     opt.remote_side = remote_side();
@@ -2910,13 +2883,62 @@ int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
     opt.initial_ssl_ctx = _ssl_ctx;
     opt.keytable_pool = _keytable_pool;
     opt.app_connect = _app_connect;
-    opt.use_rdma =  (_rdma_ep) ? true : false;
+    opt.use_rdma =  RDMA_OFF != _rdma_state;
     if (get_client_side_messenger()->Create(opt, &id) != 0 ||
-        Socket::Address(id, short_socket) != 0) {
+        Socket::Address(id, sub_socket) != 0) {
         return -1;
     }
-    (*short_socket)->ShareStats(this);
+    (*sub_socket)->ShareStats(this);
     return 0;
+}
+
+int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
+    int rc = GetSubSocket(short_socket);
+    if (0 != rc) {
+        return rc;
+    }
+    (*short_socket)->set_connection_type(CONNECTION_TYPE_SHORT);
+    return 0;
+}
+
+int Socket::GetSingleSocket(SocketUniquePtr* single_socket) {
+    if (single_socket == NULL) {
+        LOG(ERROR) << "single_socket is NULL";
+        return -1;
+    }
+
+    SocketId id = _single_socket_id.load(butil::memory_order_relaxed);
+    SocketUniquePtr tmp_sock;
+    while (true) {
+        if (Socket::Address(id, &tmp_sock) == 0) {
+            single_socket->swap(tmp_sock);
+            return 0;
+        }
+        if (GetSubSocket(&tmp_sock) != 0) {
+            LOG(ERROR) << "Fail to get socket from " << *this;
+            return -1;
+        }
+        if (_agent_socket_id.compare_exchange_strong(id, tmp_sock->id(),
+                                                     butil::memory_order_acq_rel)) {
+            single_socket->swap(tmp_sock);
+            (*single_socket)->set_connection_type(CONNECTION_TYPE_SINGLE);
+            return 0;
+        }
+        tmp_sock->ReleaseAdditionalReference();
+        // `_id' was updated, re-address.
+    }
+}
+
+int Socket::GetSocket(ConnectionType type, SocketUniquePtr* sub_socket) {
+    if (type == CONNECTION_TYPE_SHORT) {
+        return GetShortSocket(sub_socket);
+    } else if (type == CONNECTION_TYPE_SINGLE) {
+        return GetSingleSocket(sub_socket);
+    } else if (type == CONNECTION_TYPE_POOLED) {
+        return GetPooledSocket(sub_socket);
+    }
+    LOG(ERROR) << "Invalid connection type=" << ConnectionTypeToString(type);
+    return -1;
 }
 
 int Socket::GetAgentSocket(SocketUniquePtr* out, bool (*checkfn)(Socket*)) {
@@ -2931,8 +2953,8 @@ int Socket::GetAgentSocket(SocketUniquePtr* out, bool (*checkfn)(Socket*)) {
             tmp_sock->ReleaseAdditionalReference();
         }
         do {
-            if (GetShortSocket(&tmp_sock) != 0) {
-                LOG(ERROR) << "Fail to get short socket from " << *this;
+            if (GetSubSocket(&tmp_sock) != 0) {
+                LOG(ERROR) << "Fail to get socket from " << *this;
                 return -1;
             }
             if (checkfn == NULL || checkfn(tmp_sock.get())) {
@@ -2944,10 +2966,11 @@ int Socket::GetAgentSocket(SocketUniquePtr* out, bool (*checkfn)(Socket*)) {
         if (_agent_socket_id.compare_exchange_strong(
                 id, tmp_sock->id(), butil::memory_order_acq_rel)) {
             out->swap(tmp_sock);
+            (*out)->set_connection_type(CONNECTION_TYPE_SINGLE);
             return 0;
         }
         tmp_sock->ReleaseAdditionalReference();
-        // id was updated, re-address
+        // `_agent_socket_id' was updated, re-address
     } while (1);
 }
 

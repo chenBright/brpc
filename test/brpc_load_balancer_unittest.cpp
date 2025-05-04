@@ -380,6 +380,7 @@ static void ValidateLALB(LALB& lalb, size_t N) {
     ASSERT_EQ(total, lalb._total.load());
 }
 
+//
 TEST_F(LoadBalancerTest, la_sanity) {
     LALB lalb;
     ASSERT_EQ(0, lalb._total.load());
@@ -741,6 +742,7 @@ TEST_F(LoadBalancerTest, fairness) {
     }
 }
 
+//
 TEST_F(LoadBalancerTest, consistent_hashing) {
     ::brpc::policy::HashFunc hashs[::brpc::policy::CONS_HASH_LB_LAST] = {
             ::brpc::policy::MurmurHash32, 
@@ -777,7 +779,6 @@ TEST_F(LoadBalancerTest, consistent_hashing) {
                 brpc::ServerId id(8888);
                 brpc::SocketOptions options;
                 options.remote_side = dummy;
-                options.user = new SaveRecycle;
                 ASSERT_EQ(0, brpc::Socket::Create(options, &id.id));
                 ids.push_back(id);
                 addrs.push_back(dummy);
@@ -825,20 +826,23 @@ TEST_F(LoadBalancerTest, consistent_hashing) {
     }
 }
 
-TEST_F(LoadBalancerTest, weighted_round_robin) {
-    const char* servers[] = { 
-            "10.92.115.19:8831", 
-            "10.42.108.25:8832", 
-            "10.36.150.32:8833", 
-            "10.36.150.32:8899", 
-            "10.92.149.48:8834", 
-            "10.42.122.201:8835",
-            "10.42.122.202:8836"
+void test_weighted_round_robin(bool panic) {
+    LOG(INFO) << "panic=" << panic;
+
+    const char* servers[] = {
+        "10.92.115.19:8831",
+        "10.42.108.25:8832",
+        "10.36.150.32:8833",
+        "10.36.150.32:8899",
+        "10.92.149.48:8834",
+        "10.42.122.201:8835",
+        "10.42.122.202:8836"
     };
     std::string weight[] = {"3", "2", "7", "200000000", "1ab", "-1", "0"};
     std::map<butil::EndPoint, int> configed_weight;
     brpc::policy::WeightedRoundRobinLoadBalancer wrrlb;
 
+    std::vector<brpc::SocketUniquePtr> ids;
     // Add server to selected list. The server with invalid weight will be skipped.
     for (size_t i = 0; i < ARRAY_SIZE(servers); ++i) {
         const char *addr = servers[i];
@@ -847,21 +851,23 @@ TEST_F(LoadBalancerTest, weighted_round_robin) {
         brpc::ServerId id(8888);
         brpc::SocketOptions options;
         options.remote_side = dummy;
-        options.user = new SaveRecycle;
         ASSERT_EQ(0, brpc::Socket::Create(options, &id.id));
         id.tag = weight[i];
+        brpc::SocketUniquePtr ptr;
+        ASSERT_EQ(0, brpc::Socket::Address(id.id, &ptr));
         if (i == 3) {
-            brpc::SocketUniquePtr ptr;
-            ASSERT_EQ(0, brpc::Socket::Address(id.id, &ptr));
             ptr->SetLogOff();
+        } else if (panic) {
+            ptr->SetFailed();
         }
+        ids.push_back(std::move(ptr));
         if ( i < 4 ) {
             int weight_num = 0;
             ASSERT_TRUE(butil::StringToInt(weight[i], &weight_num));
             configed_weight[dummy] = weight_num;
-            EXPECT_TRUE(wrrlb.AddServer(id));
+            ASSERT_TRUE(wrrlb.AddServer(id));
         } else {
-            EXPECT_FALSE(wrrlb.AddServer(id));
+            ASSERT_FALSE(wrrlb.AddServer(id));
         }
     }
 
@@ -876,22 +882,25 @@ TEST_F(LoadBalancerTest, weighted_round_robin) {
     int total_weight = 12;
     std::vector<butil::EndPoint> select_servers;
     for (int i = 0; i != total_weight; ++i) {
-        EXPECT_EQ(0, wrrlb.SelectServer(in, &out));
+        ASSERT_EQ(0, wrrlb.SelectServer(in, &out));
         select_servers.emplace_back(ptr->remote_side());
         ++select_result[ptr->remote_side()];
     }
-    
+
     for (const auto& s : select_servers) {
         std::cout << "1=" << s << ", ";
-    } 
-    std::cout << std::endl;   
-    // Check whether selected result is consistent with expected.
-    EXPECT_EQ((size_t)3, select_result.size());
-    for (const auto& result : select_result) {
-        std::cout << result.first << " result=" << result.second 
-                  << " configured=" << configed_weight[result.first] << std::endl;
-        EXPECT_EQ(result.second, (size_t)configed_weight[result.first]);
     }
+    std::cout << std::endl;
+    // Check whether selected result is consistent with expected.
+    ASSERT_EQ((size_t)3, select_result.size());
+    for (const auto& result : select_result) {
+        ASSERT_EQ(result.second, (size_t)configed_weight[result.first]) << result.first;
+    }
+}
+
+TEST_F(LoadBalancerTest, weighted_round_robin) {
+    test_weighted_round_robin(false);
+    test_weighted_round_robin(true);
 }
 
 TEST_F(LoadBalancerTest, weighted_round_robin_no_valid_server) {
@@ -911,12 +920,11 @@ TEST_F(LoadBalancerTest, weighted_round_robin_no_valid_server) {
         brpc::ServerId id(8888);
         brpc::SocketOptions options;
         options.remote_side = dummy;
-        options.user = new SaveRecycle;
         id.tag = weight[i];
         if (i < 2) {
             ASSERT_EQ(0, brpc::Socket::Create(options, &id.id));
         }
-        EXPECT_TRUE(wrrlb.AddServer(id));
+        ASSERT_TRUE(wrrlb.AddServer(id));
         if (i == 0) {
             exclude->Add(id.id);
         }
@@ -931,10 +939,17 @@ TEST_F(LoadBalancerTest, weighted_round_robin_no_valid_server) {
     brpc::SocketUniquePtr ptr;
     brpc::LoadBalancer::SelectIn in = { 0, false, false, 0u, exclude };
     brpc::LoadBalancer::SelectOut out(&ptr);
-    EXPECT_EQ(EHOSTDOWN, wrrlb.SelectServer(in, &out));
+    ASSERT_EQ(0, wrrlb.SelectServer(in, &out));
+    ASSERT_TRUE(exclude->IsExcluded((*out.ptr)->id()));
+    (*out.ptr)->SetFailed();
+    ASSERT_EQ(0, wrrlb.SelectServer(in, &out));
+    ASSERT_EQ(0, wrrlb.SelectServer(in, &out));
+    ASSERT_TRUE(exclude->IsExcluded((*out.ptr)->id()));
+    (*out.ptr)->SetFailed();
     brpc::ExcludedServers::Destroy(exclude);
 }
 
+//
 TEST_F(LoadBalancerTest, weighted_randomized) {
     const char* servers[] = {
         "10.92.115.19:8831",
@@ -959,7 +974,6 @@ TEST_F(LoadBalancerTest, weighted_randomized) {
         brpc::ServerId id(8888);
         brpc::SocketOptions options;
         options.remote_side = dummy;
-        options.user = new SaveRecycle;
         ASSERT_EQ(0, brpc::Socket::Create(options, &id.id));
         id.tag = weight[i];
         if (i < valid_weight_num) {
@@ -1012,6 +1026,7 @@ TEST_F(LoadBalancerTest, weighted_randomized) {
     }
 }
 
+//
 TEST_F(LoadBalancerTest, health_check_no_valid_server) {
     const char* servers[] = { 
             "10.92.115.19:8832", 
@@ -1023,6 +1038,7 @@ TEST_F(LoadBalancerTest, health_check_no_valid_server) {
     lbs.push_back(new brpc::policy::WeightedRoundRobinLoadBalancer);
 
     for (int i = 0; i < (int)lbs.size(); ++i) {
+        LOG(INFO) << "lb=" << i;
         brpc::LoadBalancer* lb = lbs[i];
         std::vector<brpc::ServerId> ids;
         for (size_t i = 0; i < ARRAY_SIZE(servers); ++i) {
@@ -1090,22 +1106,11 @@ TEST_F(LoadBalancerTest, health_check_no_valid_server) {
     }
 }
 
-TEST_F(LoadBalancerTest, revived_from_all_failed_sanity) {
-    const char* servers[] = {
-        "10.92.115.19:8832",
-        "10.42.122.201:8833",
-    };
-    brpc::LoadBalancer* lb = NULL;
-    int rand = butil::fast_rand_less_than(2);
-    if (rand == 0) {
-        brpc::policy::RandomizedLoadBalancer rlb;
-        lb = rlb.New("min_working_instances=2 hold_seconds=2");
-    } else if (rand == 1) {
-        brpc::policy::RoundRobinLoadBalancer rrlb;
-        lb = rrlb.New("min_working_instances=2 hold_seconds=2");
-    }
+void test_revived_from_all_failed_sanity(const brpc::LoadBalancer& lb_in,
+                                         const char* servers[], size_t num_servers) {
+    std::unique_ptr<brpc::LoadBalancer> lb(lb_in.New("min_working_instances=2 hold_seconds=2"));
     brpc::SocketUniquePtr ptr[2];
-    for (size_t i = 0; i < ARRAY_SIZE(servers); ++i) {
+    for (size_t i = 0; i < num_servers; ++i) {
         butil::EndPoint dummy;
         ASSERT_EQ(0, str2endpoint(servers[i], &dummy));
         brpc::SocketOptions options;
@@ -1154,6 +1159,33 @@ TEST_F(LoadBalancerTest, revived_from_all_failed_sanity) {
     for (int i = 0; i < 10; ++i) {
         ASSERT_EQ(0, lb->SelectServer(in, &out));
     }
+}
+
+TEST_F(LoadBalancerTest, revived_from_all_failed_sanity) {
+    const char* servers[] = {
+        "10.92.115.19:8832",
+        "10.42.122.201:8833",
+    };
+    brpc::LoadBalancer* lb = NULL;
+    int rand = butil::fast_rand_less_than(2);
+    if (rand == 0) {
+        brpc::policy::RandomizedLoadBalancer rlb;
+        lb = rlb.New("min_working_instances=2 hold_seconds=2");
+    } else if (rand == 1) {
+        brpc::policy::RoundRobinLoadBalancer rrlb;
+        lb = rrlb.New("min_working_instances=2 hold_seconds=2");
+    }
+    size_t num_servers = ARRAY_SIZE(servers);
+    for (size_t i = 0; i < num_servers; ++i) {
+        if (rand == 0) {
+            brpc::policy::RandomizedLoadBalancer rlb;
+            test_revived_from_all_failed_sanity(rlb, servers, num_servers);
+        } else if (rand == 1) {
+            brpc::policy::RoundRobinLoadBalancer rrlb;
+            test_revived_from_all_failed_sanity(rrlb, servers, num_servers);
+        }
+    }
+
 }
 
 #ifndef BUTIL_USE_ASAN
@@ -1304,7 +1336,7 @@ TEST_F(LoadBalancerTest, la_selection_too_long) {
     brpc::LoadBalancer::SelectIn in = { 0, false, false, 0u, nullptr };
     brpc::SocketUniquePtr ptr;
     brpc::LoadBalancer::SelectOut out(&ptr);
-    ASSERT_EQ(EHOSTDOWN, lb.SelectServer(in, &out));
+    ASSERT_EQ(0, lb.SelectServer(in, &out));
 }
 
 } //namespace

@@ -101,7 +101,9 @@ bool DefaultClusterRecoverPolicy::DoReject(const std::vector<ServerId>& server_l
             _last_usable_change_time_ms = now_ms;
         }
     }
-    if (butil::fast_rand_less_than(_min_working_instances) >= usable) {
+    int64_t min_working_instances =
+        std::min(_min_working_instances, (int64_t)server_list.size());
+    if (butil::fast_rand_less_than(min_working_instances) >= usable) {
         return true;
     }
     return false;

@@ -301,23 +301,46 @@ int ConsistentHashingLoadBalancer::SelectServer(
     if (s->empty()) {
         return ENODATA;
     }
-    std::vector<Node>::const_iterator choice =
-        std::lower_bound(s->begin(), s->end(), (uint32_t)in.request_code);
+    auto choice = std::lower_bound(s->begin(), s->end(), (uint32_t)in.request_code);
     if (choice == s->end()) {
         choice = s->begin();
     }
+    brpc::SocketUniquePtr ptr;
+    brpc::SocketUniquePtr panic_ptr;
     for (size_t i = 0; i < s->size(); ++i) {
-        if (((i + 1) == s->size() // always take last chance
-             || !ExcludedServers::IsExcluded(in.excluded, choice->server_sock.id))
-            && Socket::Address(choice->server_sock.id, out->ptr) == 0 
-            && (*out->ptr)->IsAvailable()) {
-            return 0;
-        } else {
-            if (++choice == s->end()) {
-                choice = s->begin();
-            }
+        if (choice == s->end()) {
+            choice = s->begin();
         }
+        SocketId id = choice->server_sock.id;
+        int rc = Socket::AddressFailedAsWell(id, &ptr);
+        if (-1 == rc || !ptr->IsAvailable()) {
+            continue;
+        }
+
+        // Store a panic server.
+        if (NULL == (*out->ptr)) {
+            ptr->ReAddress(out->ptr);
+        }
+        if (ExcludedServers::IsExcluded(in.excluded, id)) {
+            continue;
+        }
+        if (!ptr->Failed()) {
+            // An available server is found.
+            *out->ptr = std::move(panic_ptr);
+            return 0;
+        }
+
+        ++choice;
     }
+
+    // After traversing the whole server list, no available server is found.
+
+    // Use the panic server if it has been stored in `out->ptr'.
+    if (NULL != panic_ptr) {
+        *out->ptr = std::move(panic_ptr);
+        return 0;
+    }
+    // All servers are log off.
     return EHOSTDOWN;
 }
 

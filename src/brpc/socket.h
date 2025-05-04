@@ -223,7 +223,6 @@ private:
     uint64_t _data;
 };
 
-
 struct SocketSSLContext {
     SocketSSLContext();
     ~SocketSSLContext();
@@ -255,7 +254,7 @@ struct SocketOptions {
     // Default: false, means that a connection will be established
     // on first write.
     bool connect_on_create{false};
-    // Default: NULL, means no timeout.
+    // Default: NULL, means no timeout when establishing connection on create.
     const timespec* connect_abstime{NULL};
     SocketUser* user{NULL};
     // When *edge-triggered* events happen on the file descriptor, callback
@@ -285,6 +284,7 @@ struct SocketOptions {
     int tcp_user_timeout_ms{ -1};
     // Tag of this socket
     bthread_tag_t bthread_tag{bthread_self_tag()};
+    bool main_socket_mode{false};
 };
 
 // Abstractions on reading from and writing into file descriptors.
@@ -580,8 +580,13 @@ public:
     // Return true on success
     bool GetPooledSocketStats(int* numfree, int* numinflight);
 
+    // todo private
+    int GetSubSocket(SocketUniquePtr* sub_socket);
     // Create a socket connecting to the same place as this socket.
     int GetShortSocket(SocketUniquePtr* short_socket);
+    int GetSingleSocket(SocketUniquePtr* short_socket);
+
+    int GetSocket(ConnectionType type, SocketUniquePtr* sub_socket);
 
     // Get and persist a socket connecting to the same place as this socket.
     // If an agent socket was already created and persisted, it's returned
@@ -800,26 +805,34 @@ private:
 
     void CancelUnwrittenBytes(size_t bytes);
 
+    void set_connection_type(ConnectionType type) {
+        _connection_type = type;
+    }
+
+    ConnectionType connection_type() const {
+        return _connection_type;
+    }
+
 private:
     // In/Out bytes/messages, SocketPool etc
     // _shared_part is shared by a main socket and all its pooled sockets.
     // Can't use intrusive_ptr because the creation is based on optimistic
     // locking and relies on atomic CAS. We manage references manually.
-    butil::atomic<SharedPart*> _shared_part;
+    butil::atomic<SharedPart*> _shared_part{NULL};
 
     // [ Set in dispatcher ]
     // To keep the callback in at most one bthread at any time. Read comments
     // about ProcessEvent in socket.cpp to understand the tricks.
-    butil::atomic<int> _nevent;
+    butil::atomic<int> _nevent{0};
 
     // May be set by Acceptor to share keytables between reading threads
     // on sockets created by the Acceptor.
-    bthread_keytable_pool_t* _keytable_pool;
+    bthread_keytable_pool_t* _keytable_pool{NULL};
 
     // [ Set in ResetFileDescriptor ]
-    butil::atomic<int> _fd;  // -1 when not connected.
-    int _tos;                // Type of service which is actually only 8bits.
-    int64_t _reset_fd_real_us; // When _fd was reset, in microseconds.
+    butil::atomic<int> _fd{-1};  // -1 when not connected.
+    int _tos{0}; // Type of service which is actually only 8bits.
+    int64_t _reset_fd_real_us{-1}; // When _fd was reset, in microseconds.
 
     // Address of peer. Initialized by SocketOptions.remote_side.
     butil::EndPoint _remote_side;
@@ -830,14 +843,14 @@ private:
     // Called when edge-triggered events happened on `_fd'. Read comments
     // of EventDispatcher::AddConsumer (event_dispatcher.h)
     // carefully before implementing the callback.
-    void (*_on_edge_triggered_events)(Socket*);
+    void (*_on_edge_triggered_events)(Socket*){NULL};
 
     // A set of callbacks to monitor important events of this socket.
     // Initialized by SocketOptions.user
-    SocketUser* _user;
+    SocketUser* _user{NULL};
 
     // Customize creation of the connection. Initialized by SocketOptions.conn
-    SocketConnection* _conn;
+    SocketConnection* _conn{NULL};
 
     // User-level connection after TCP-connected.
     // Initialized by SocketOptions.app_connect.
@@ -847,49 +860,49 @@ private:
 
     // last chosen index of the protocol as a heuristic value to avoid
     // iterating all protocol handlers each time.
-    int _preferred_index;
+    int _preferred_index{-1};
 
     // Number of HC since the last SetFailed() was called. Set to 0 when the
     // socket is revived. Only set in HealthCheckTask::OnTriggeringTask()
-    int _hc_count;
+    int _hc_count{0};
 
     // Size of current incomplete message, set to 0 on complete.
-    uint32_t _last_msg_size;
+    uint32_t _last_msg_size{0};
     // Average message size of last #MSG_SIZE_WINDOW messages (roughly)
-    uint32_t _avg_msg_size;
+    uint32_t _avg_msg_size{0};
 
     // Storing data read from `_fd' but cut-off yet.
     butil::IOPortal _read_buf;
 
     // Set with cpuwide_time_us() at last read operation
-    butil::atomic<int64_t> _last_readtime_us;
+    butil::atomic<int64_t> _last_readtime_us{0};
 
     // Saved context for parsing, reset before trying other protocols.
-    butil::atomic<Destroyable*> _parsing_context;
+    butil::atomic<Destroyable*> _parsing_context{NULL};
 
     // Saving the correlation_id of RPC on protocols that cannot put
     // correlation_id on-wire and do not send multiple requests on one
     // connection simultaneously.
-    uint64_t _correlation_id;
+    uint64_t _correlation_id{0};
 
     // Non-zero when health-checking is on.
-    int _health_check_interval_s;
+    int _health_check_interval_s{-1};
 
     // The variable indicates whether the reference related
     // to the health checking is held by someone. It can be
     // synchronized via _versioned_ref atomic variable.
-    bool _is_hc_related_ref_held;
+    bool _is_hc_related_ref_held{false};
 
     // Default: false.
     // true, if health checking is started.
-    butil::atomic<bool> _hc_started;
+    butil::atomic<bool> _hc_started{false};
 
     // +-1 bit-+---31 bit---+
     // |  flag |   counter  |
     // +-------+------------+
     // 1-bit flag to ensure `SetEOF' to be called only once
     // 31-bit counter of requests that are currently being processed
-    butil::atomic<uint32_t> _ninprocess;
+    butil::atomic<uint32_t> _ninprocess{1};
 
     // +---32 bit---+---32 bit---+
     // |  auth flag | auth error |
@@ -898,72 +911,79 @@ private:
     // 0 - not authenticated yet
     // 1 - authentication completed (whether it succeeded or not
     //     depends on `auth error')
-    butil::atomic<uint64_t> _auth_flag_error;
-    bthread_id_t _auth_id;
+    butil::atomic<uint64_t> _auth_flag_error{0};
+    bthread_id_t _auth_id{INVALID_BTHREAD_ID};
 
     // Stores authentication result/context of this socket. This only
     // exists in server side
-    AuthContext* _auth_context;
+    AuthContext* _auth_context{NULL};
 
     // Only accept ssl connection.
-    bool _force_ssl;
-    SSLState _ssl_state;
+    bool _force_ssl{false};
+    SSLState _ssl_state{SSL_UNKNOWN};
     // SSL objects cannot be read and written at the same time.
     // Use mutex to protect SSL objects when ssl_state is SSL_CONNECTED.
     mutable butil::Mutex _ssl_session_mutex;
-    SSL* _ssl_session;               // owner
+    SSL* _ssl_session{NULL}; // owner
     std::shared_ptr<SocketSSLContext> _ssl_ctx;
 
     // The RdmaEndpoint
-    rdma::RdmaEndpoint* _rdma_ep;
+    rdma::RdmaEndpoint* _rdma_ep{NULL};
     // Should use RDMA or not
-    RdmaState _rdma_state;
+    RdmaState _rdma_state{RDMA_OFF};
+
+    // Connection type of sub socket.
+    // Connection type of Main socket is always CONNECTION_TYPE_UNKNOWN.
+    ConnectionType _connection_type{CONNECTION_TYPE_UNKNOWN};
+    // Only used as main socket, not used to send data.
+    bool _main_socket_mode{false};
 
     // Pass from controller, for progressive reading.
-    ConnectionType _connection_type_for_progressive_read;
-    butil::atomic<bool> _controller_released_socket;
+    ConnectionType _connection_type_for_progressive_read{CONNECTION_TYPE_UNKNOWN};
+    butil::atomic<bool> _controller_released_socket{false};
 
     // True if the socket is too full to write.
-    volatile bool _overcrowded;
+    volatile bool _overcrowded{false};
 
-    bool _fail_me_at_server_stop;
+    bool _fail_me_at_server_stop{false};
 
     // Set by SetLogOff
-    butil::atomic<bool> _logoff_flag;
+    butil::atomic<bool> _logoff_flag{false};
 
     // Concrete error information from SetFailed()
     // Accesses to these 2 fields(especially _error_text) must be protected
     // by _id_wait_list_mutex
-    int _error_code;
+    int _error_code{0};
     std::string _error_text;
 
-    butil::atomic<SocketId> _agent_socket_id;
+    butil::atomic<SocketId> _single_socket_id{INVALID_SOCKET_ID};
+    butil::atomic<SocketId> _agent_socket_id{INVALID_SOCKET_ID};
 
     butil::Mutex _pipeline_mutex;
-    std::deque<PipelinedInfo>* _pipeline_q;
+    std::deque<PipelinedInfo>* _pipeline_q{NULL};
 
     // For storing call-id of in-progress RPC.
     pthread_mutex_t _id_wait_list_mutex;
     bthread_id_list_t _id_wait_list;
 
     // Set with cpuwide_time_us() at last write operation
-    butil::atomic<int64_t> _last_writetime_us;
+    butil::atomic<int64_t> _last_writetime_us{0};
     // Queued but written
-    butil::atomic<int64_t> _unwritten_bytes;
+    butil::atomic<int64_t> _unwritten_bytes{0};
 
     // Butex to wait for EPOLLOUT event
-    butil::atomic<int>* _epollout_butex;
+    butil::atomic<int>* _epollout_butex{NULL};
 
     // Storing data that are not flushed into `fd' yet.
-    butil::atomic<WriteRequest*> _write_head;
+    butil::atomic<WriteRequest*> _write_head{NULL};
 
-    bool _is_write_shutdown;
+    bool _is_write_shutdown{false};
 
     butil::Mutex _stream_mutex;
-    std::set<StreamId> *_stream_set;
-    butil::atomic<int64_t> _total_streams_unconsumed_size;
+    std::set<StreamId>* _stream_set{NULL};
+    butil::atomic<int64_t> _total_streams_unconsumed_size{0};
 
-    butil::atomic<int64_t> _ninflight_app_health_check;
+    butil::atomic<int64_t> _ninflight_app_health_check{0};
 
     // Socket keepalive related options.
     // Refer to `SocketKeepaliveOptions' for details.
@@ -977,9 +997,9 @@ private:
     // untransmitted (due to zero window size) before TCP will
     // forcibly close the corresponding connection and return
     // ETIMEDOUT to the application.
-    int _tcp_user_timeout_ms;
+    int _tcp_user_timeout_ms{0};
 
-    HttpMethod _http_request_method;
+    HttpMethod _http_request_method{HTTP_METHOD_GET};
 };
 
 } // namespace brpc

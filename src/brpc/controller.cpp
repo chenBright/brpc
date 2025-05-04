@@ -797,10 +797,7 @@ void Controller::Call::OnComplete(
         break;
     case CONNECTION_TYPE_SINGLE:
         // Set main socket to be failed for connection refusal of streams.
-        // "single" streams are often maintained in a separate SocketMap and
-        // different from the main socket as well.
-        if (c->_stream_creator != NULL &&
-            does_error_affect_main_socket(error_code) &&
+        if (does_error_affect_main_socket(error_code) &&
             (sending_sock == NULL || sending_sock->id() != peer_id)) {
             Socket::SetFailed(peer_id);
         }
@@ -1079,8 +1076,8 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     if (SingleServer()) {
         // Don't use _current_call.peer_id which is set to -1 after construction
         // of the backup call.
-        const int rc = Socket::Address(_single_server_id, &tmp_sock);
-        if (rc != 0 || (!is_health_check_call() && !tmp_sock->IsAvailable())) {
+        const int rc = Socket::AddressFailedAsWell(_single_server_id, &tmp_sock);
+        if (-1 == rc || (!is_health_check_call() && !tmp_sock->IsAvailable())) {
             SetFailed(EHOSTDOWN, "Not connected to %s yet, server_id=%" PRIu64,
                       endpoint2str(_remote_side).c_str(), _single_server_id);
             tmp_sock.reset();  // Release ref ASAP
@@ -1109,15 +1106,6 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
         // here.
         _remote_side = tmp_sock->remote_side();
     }
-    if (_stream_creator) {
-        _current_call.stream_user_data =
-            _stream_creator->OnCreatingStream(&tmp_sock, this);
-        if (FailedInline()) {
-            return HandleSendFailed();
-        }
-        // remote_side can't be changed.
-        CHECK_EQ(_remote_side, tmp_sock->remote_side());
-    }
 
     Span* span = _span;
     if (span) {
@@ -1129,20 +1117,28 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
         }
     }
     // Handle connection type
-    if (_connection_type == CONNECTION_TYPE_SINGLE ||
-        _stream_creator != NULL) { // let user decides the sending_sock
-        // in the callback(according to connection_type) directly
+    if (_stream_creator != NULL) {
+        _current_call.stream_user_data =
+            _stream_creator->OnCreatingStream(&tmp_sock, this);
+        if (FailedInline()) {
+            return HandleSendFailed();
+        }
+        // remote_side can't be changed.
+        CHECK_EQ(_remote_side, tmp_sock->remote_side());
         _current_call.sending_sock.reset(tmp_sock.release());
-        // TODO(gejun): Setting preferred index of single-connected socket
-        // has two issues:
+        // TODO(gejun): Setting preferred index of single-connected socket has two issues:
         //   1. race conditions. If a set perferred_index is overwritten by
         //      another thread, the response back has to check protocols one
         //      by one. This is a performance issue, correctness is unaffected.
         //   2. thrashing between different protocols. Also a performance issue.
         _current_call.sending_sock->set_preferred_index(_preferred_index);
     } else {
+        // let user decides the sending_sock in the
+        // callback(according to connection_type) directly.
         int rc = 0;
-        if (_connection_type == CONNECTION_TYPE_POOLED) {
+        if (_connection_type == CONNECTION_TYPE_SINGLE) {
+            rc = tmp_sock->GetSingleSocket(&_current_call.sending_sock);
+        } else if (_connection_type == CONNECTION_TYPE_POOLED) {
             rc = tmp_sock->GetPooledSocket(&_current_call.sending_sock);
         } else if (_connection_type == CONNECTION_TYPE_SHORT) {
             rc = tmp_sock->GetShortSocket(&_current_call.sending_sock);
@@ -1161,6 +1157,12 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
         // the response comes back, InputMessenger calls the right handler
         // w/o trying other protocols. This is a must for (many) protocols that
         // can't be distinguished from other protocols w/o ambiguity.
+        //
+        // TODO(gejun): Setting preferred index of single-connected socket has two issues:
+        //   1. race conditions. If a set perferred_index is overwritten by
+        //      another thread, the response back has to check protocols one
+        //      by one. This is a performance issue, correctness is unaffected.
+        //   2. thrashing between different protocols. Also a performance issue.
         _current_call.sending_sock->set_preferred_index(_preferred_index);
         // Set preferred_index of main_socket as well to make it easier to
         // debug and observe from /connections.

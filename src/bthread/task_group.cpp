@@ -331,7 +331,7 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
         // A task can be stopped before it gets running, in which case
         // we may skip user function, but that may confuse user:
         // Most tasks have variables to remember running result of the task,
-        // which is often initialized to values indicating success. If an
+        // which is often initialized to values indicating success. If a
         // user function is never called, the variables will be unchanged
         // however they'd better reflect failures because the task is stopped
         // abnormally.

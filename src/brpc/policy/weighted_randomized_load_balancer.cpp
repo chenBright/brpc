@@ -123,22 +123,75 @@ int WeightedRandomizedLoadBalancer::SelectServer(const SelectIn& in, SelectOut* 
     if (n == 0) {
         return ENODATA;
     }
+
+    brpc::SocketUniquePtr ptr;
+    brpc::SocketUniquePtr panic_ptr;
+    butil::FlatSet<SocketId> random_traversed;
     uint64_t weight_sum = s->weight_sum;
     for (size_t i = 0; i < n; ++i) {
         uint64_t random_weight = butil::fast_rand_less_than(weight_sum);
         const Server random_server(0, 0, random_weight);
-        const auto& server = std::lower_bound(s->server_list.begin(), s->server_list.end(), random_server, server_compare);
+        const auto& server =
+            std::lower_bound(s->server_list.begin(), s->server_list.end(),
+                             random_server, server_compare);
         const SocketId id = server->id;
-        if (((i + 1) == n  // always take last chance
-             || !ExcludedServers::IsExcluded(in.excluded, id))
-            && Socket::Address(id, out->ptr) == 0
-            && (*out->ptr)->IsAvailable()) {
-            // We found an available server
+        random_traversed.insert(id);
+        int rc = Socket::AddressFailedAsWell(id, &ptr);
+        if (-1 == rc || !ptr->IsAvailable()) {
+            continue;
+        }
+
+        // Store a panic server.
+        if (NULL == panic_ptr) {
+            ptr->ReAddress(&panic_ptr);
+        }
+        if (ExcludedServers::IsExcluded(in.excluded, id)) {
+            // todo 这里不应该加到random_traversed里
+            continue;
+        }
+        if (!ptr->Failed()) {
+            // An available server is found.
+            *out->ptr = std::move(ptr);
             return 0;
         }
     }
-    // After we traversed the whole server list, there is still no
-    // available server
+
+    if (random_traversed.size() == n) {
+        // Try to traverse the remaining servers to find an available server.
+        uint32_t offset = butil::fast_rand_less_than(n);
+        uint32_t stride = GenRandomStride();
+        for (size_t i = 0; i < n; ++i) {
+            offset = (offset + stride) % n;
+            SocketId id = s->server_list[offset].id;
+            if (NULL != random_traversed.seek(id)) {
+                continue;
+            }
+            int rc = Socket::AddressFailedAsWell(id, &ptr);
+            if (-1 == rc || !ptr->IsAvailable()) {
+                continue;
+            }
+
+            if (!ptr->Failed()) {
+                // An available server is found.
+                *out->ptr = std::move(ptr);
+                return 0;
+            }
+
+            // Store a panic server.
+            if (NULL == panic_ptr) {
+                ptr->ReAddress(&panic_ptr);
+            }
+        }
+    }
+
+    // After traversing the whole server list, no available server is found.
+
+    // Use the panic server if it has been stored in `out->ptr'.
+    if (NULL != panic_ptr) {
+        *out->ptr = std::move(panic_ptr);
+        return 0;
+    }
+    // All servers are log off.
     return EHOSTDOWN;
 }
 

@@ -271,6 +271,9 @@ int LocalityAwareLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) 
     if (n == 0) {
         return ENODATA;
     }
+
+    brpc::SocketUniquePtr ptr;
+    brpc::SocketUniquePtr panic_ptr;
     size_t ntry = 0;
     size_t nloop = 0;
     int64_t total = _total.load(butil::memory_order_relaxed);
@@ -283,7 +286,7 @@ int LocalityAwareLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) 
         // production servers. If it does, there must be a bug.
         if (++nloop > 10000) {
             LOG(ERROR) << "A selection runs too long!";
-            return EHOSTDOWN;
+            break;
         }
         
         // Locate a weight range in the tree. This is obviously not atomic and
@@ -302,58 +305,71 @@ int LocalityAwareLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) 
             if (index < n) {
                 continue;
             }
-        } else if (Socket::Address(info.server_id, out->ptr) == 0
-                   && (*out->ptr)->IsAvailable()) {
-            if ((ntry + 1) == n  // Instead of fail with EHOSTDOWN, we prefer
-                                 // choosing the server again.
-                || !ExcludedServers::IsExcluded(in.excluded, info.server_id)) {
-                if (!in.changable_weights) {
-                    return 0;
-                }
-                const Weight::AddInflightResult r =
-                    info.weight->AddInflight(in, index, dice - left);
-                if (r.weight_diff) {
-                    s->UpdateParentWeights(r.weight_diff, index);
-                    _total.fetch_add(r.weight_diff, butil::memory_order_relaxed);
-                }
-                if (r.chosen) {
-                    out->need_feedback = true;
-                    return 0;
-                }
-            }
-            if (++ntry >= n) {
-                break;
-            }
-        } else if (in.changable_weights) {
-            const int64_t diff =
-                info.weight->MarkFailed(index, total / n);
-            if (diff) {
-                s->UpdateParentWeights(diff, index);
-                _total.fetch_add(diff, butil::memory_order_relaxed);
-            }
-            if (dice >= left + self + diff) {
-                dice -= left + self + diff;
-                index = index * 2 + 2;
-            } else {
-		// left child may contain available nodes
-		dice = butil::fast_rand_less_than(left);
-		index = index * 2 + 1;
-	    }
-	    if (index < n) {
-		continue;
-            }
-            if (++ntry >= n) {
-                break;
-            }
         } else {
-            if (++ntry >= n) {
-                break;
-            } 
+            int rc = Socket::AddressFailedAsWell(info.server_id, &ptr);
+            if (-1 != rc && ptr->IsAvailable()) {
+                // Store a panic server.
+                if (NULL == panic_ptr) {
+                    ptr->ReAddress(&panic_ptr);
+                }
+                if (!ExcludedServers::IsExcluded(in.excluded, info.server_id)) {
+                    if (!in.changable_weights) {
+                        *out->ptr = std::move(ptr);
+                        return 0;
+                    }
+                    const Weight::AddInflightResult r =
+                        info.weight->AddInflight(in, index, dice - left);
+                    if (r.weight_diff) {
+                        s->UpdateParentWeights(r.weight_diff, index);
+                        _total.fetch_add(r.weight_diff, butil::memory_order_relaxed);
+                    }
+                    if (r.chosen) {
+                        out->need_feedback = true;
+                        *out->ptr = std::move(ptr);
+                        return 0;
+                    }
+                }
+                if (++ntry >= n) {
+                    break;
+                }
+            } else if (in.changable_weights) {
+                const int64_t diff =
+                    info.weight->MarkFailed(index, total / n);
+                if (diff) {
+                    s->UpdateParentWeights(diff, index);
+                    _total.fetch_add(diff, butil::memory_order_relaxed);
+                }
+                if (dice >= left + self + diff) {
+                    dice -= left + self + diff;
+                    index = index * 2 + 2;
+                } else {
+                    // left child may contain available nodes
+                    dice = butil::fast_rand_less_than(left);
+                    index = index * 2 + 1;
+                }
+                if (index < n) {
+                    continue;
+                }
+                if (++ntry >= n) {
+                    break;
+                }
+            } else {
+                if (++ntry >= n) {
+                    break;
+                }
+            }
         }
         total = _total.load(butil::memory_order_relaxed);
         dice = butil::fast_rand_less_than(total);
         index = 0;
     }
+
+    // Use the panic server if it has been stored in `out->ptr'.
+    if (NULL != panic_ptr) {
+        *out->ptr = std::move(panic_ptr);
+        return 0;
+    }
+    // All servers are log off.
     return EHOSTDOWN;
 }
 

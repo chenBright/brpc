@@ -79,6 +79,9 @@ struct SocketMapKeyHasher {
 // The corresponding SocketId is written to `*id'. If this function returns
 // successfully, SocketMapRemove() MUST be called when the Socket is not needed.
 // Return 0 on success, -1 otherwise.
+
+int SocketMapInsert(const SocketMapKey& key, SocketId* id, const SocketOptions& options);
+
 int SocketMapInsert(const SocketMapKey& key, SocketId* id,
                     const std::shared_ptr<SocketSSLContext>& ssl_ctx,
                     bool use_rdma);
@@ -149,12 +152,19 @@ public:
     SocketMap();
     ~SocketMap();
     int Init(const SocketMapOptions&);
+    int Insert(const SocketMapKey& key, SocketId* id, const SocketOptions& options);
     int Insert(const SocketMapKey& key, SocketId* id,
                const std::shared_ptr<SocketSSLContext>& ssl_ctx,
-               bool use_rdma);
+               bool use_rdma) {
+        SocketOptions options;
+        options.initial_ssl_ctx = ssl_ctx;
+        options.use_rdma = use_rdma;
+        return Insert(key, id, options);
+    }
+
     int Insert(const SocketMapKey& key, SocketId* id,
                const std::shared_ptr<SocketSSLContext>& ssl_ctx) {
-        return Insert(key, id, ssl_ctx, false);   
+        return Insert(key, id, ssl_ctx, false);
     }
     int Insert(const SocketMapKey& key, SocketId* id) {
         std::shared_ptr<SocketSSLContext> empty_ptr;

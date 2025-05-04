@@ -51,11 +51,14 @@ private:
         uint32_t stride;
         uint32_t offset;
     };
+
     bool SetParameters(const butil::StringPiece& params);
     static bool Add(Servers& bg, const ServerId& id);
     static bool Remove(Servers& bg, const ServerId& id);
     static size_t BatchAdd(Servers& bg, const std::vector<ServerId>& servers);
     static size_t BatchRemove(Servers& bg, const std::vector<ServerId>& servers);
+    int SelectServerWithClusterRecoverPolicy(const SelectIn& in, SelectOut* out);
+    int SelectServerWithPanicPolicy(const SelectIn& in, SelectOut* out);
 
     butil::DoublyBufferedData<Servers, TLS> _db_servers;
     std::shared_ptr<ClusterRecoverPolicy> _cluster_recover_policy;

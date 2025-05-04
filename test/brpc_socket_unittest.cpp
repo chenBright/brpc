@@ -658,7 +658,9 @@ TEST_F(SocketTest, app_level_health_check) {
     GFLAGS_NAMESPACE::SetCommandLineOption("health_check_interval", hc_buf);
 }
 
-TEST_F(SocketTest, health_check) {
+void test_health_check(bool use_my_message, bool main_socket_mode) {
+    LOG(INFO) << "use_my_message=" << use_my_message
+              << ", main_socket_mode=" << main_socket_mode;
     // FIXME(gejun): Messenger has to be new otherwise quitting may crash.
     brpc::Acceptor* messenger = new brpc::Acceptor;
 
@@ -669,12 +671,17 @@ TEST_F(SocketTest, health_check) {
     options.remote_side = point;
     options.user = new CheckRecycle;
     options.health_check_interval_s = kCheckInteval/*s*/;
+    options.main_socket_mode = main_socket_mode;
     ASSERT_EQ(0, brpc::Socket::Create(options, &id));
     brpc::Socket* s = NULL;
+    brpc::SocketUniquePtr main_socket_mode_ptr;
     {
         brpc::SocketUniquePtr ptr;
         ASSERT_EQ(0, brpc::Socket::Address(id, &ptr));
         s = ptr.get();
+        if (main_socket_mode) {
+            main_socket_mode_ptr = std::move(ptr);
+        }
     }
     global_sock = s;
     ASSERT_NE(nullptr, s);
@@ -683,57 +690,64 @@ TEST_F(SocketTest, health_check) {
     ASSERT_EQ(id, s->id());
     int32_t nref = -1;
     ASSERT_EQ(0, brpc::Socket::Status(id, &nref));
-    ASSERT_EQ(2, nref);
+    // In main socket mode, `nref' can be larger than 2.
+    ASSERT_EQ(main_socket_mode ? 3 : 2, nref);
 
-    char buf[64];
-    const size_t meta_len = 4;
-    *(uint32_t*)(buf + 12) = *(uint32_t*)"Meta";
-    const size_t len = snprintf(buf + 12 + meta_len,
-                                sizeof(buf) - 12 - meta_len,
-                                "hello world!");
-    memcpy(buf, "HULU", 4);
-    // HULU uses host byte order directly...
-    *(uint32_t*)(buf + 4) = len + meta_len;
-    *(uint32_t*)(buf + 8) = meta_len;
-    const bool use_my_message = (butil::fast_rand_less_than(2) == 0);
-    brpc::SocketMessagePtr<MyMessage> msg;
-    int appended_msg = 0;
-    butil::IOBuf src;
-    if (use_my_message) {
-        LOG(INFO) << "Use MyMessage";
-        msg.reset(new MyMessage(buf, 12 + meta_len + len, &appended_msg));
-    } else {
-        src.append(buf, 12 + meta_len + len);
-        ASSERT_EQ(12 + meta_len + len, src.length());
-    }
+    if (!main_socket_mode) {
+        char buf[64];
+        const size_t meta_len = 4;
+        *(uint32_t*)(buf+12) = *(uint32_t*)"Meta";
+        const size_t len = snprintf(buf+12+meta_len,
+            sizeof(buf)-12-meta_len,
+            "hello world!");
+        memcpy(buf, "HULU", 4);
+        // HULU uses host byte order directly...
+        *(uint32_t*)(buf+4) = len+meta_len;
+        *(uint32_t*)(buf+8) = meta_len;
+        brpc::SocketMessagePtr<MyMessage> msg;
+        int appended_msg = 0;
+        butil::IOBuf src;
+        if (use_my_message) {
+            LOG(INFO) << "Use MyMessage";
+            msg.reset(new MyMessage(buf, 12+meta_len+len, &appended_msg));
+        }
+        else {
+            src.append(buf, 12 + meta_len+len);
+            ASSERT_EQ(12 + meta_len+len, src.length());
+        }
 #ifdef CONNECT_IN_KEEPWRITE
-    bthread_id_t wait_id;
-    WaitData data;
-    ASSERT_EQ(0, bthread_id_create2(&wait_id, &data, OnWaitIdReset));
-    brpc::Socket::WriteOptions wopt;
-    wopt.id_wait = wait_id;
-    if (use_my_message) {
-        ASSERT_EQ(0, s->Write(msg, &wopt));
-    } else {
-        ASSERT_EQ(0, s->Write(&src, &wopt));
-    }
-    ASSERT_EQ(0, bthread_id_join(wait_id));
-    ASSERT_EQ(wait_id.value, data.id.value);
-    ASSERT_EQ(ECONNREFUSED, data.error_code);
-    ASSERT_TRUE(butil::StringPiece(data.error_text).starts_with(
-                    "Fail to connect "));
-    if (use_my_message) {
-        ASSERT_TRUE(appended_msg);
-    }
+        bthread_id_t wait_id;
+        WaitData data;
+        ASSERT_EQ(0, bthread_id_create2(&wait_id, &data, OnWaitIdReset));
+        brpc::Socket::WriteOptions wopt;
+        wopt.id_wait = wait_id;
+        if (use_my_message) {
+            ASSERT_EQ(0, s->Write(msg, &wopt));
+        }
+        else {
+            ASSERT_EQ(0, s->Write(&src, &wopt));
+        }
+        ASSERT_EQ(0, bthread_id_join(wait_id));
+        ASSERT_EQ(wait_id.value, data.id.value);
+        ASSERT_EQ(ECONNREFUSED, data.error_code);
+        ASSERT_TRUE(butil::StringPiece(data.error_text).starts_with("Fail to connect "));
+        if (use_my_message) {
+            ASSERT_TRUE(appended_msg);
+        }
 #else
-    if (use_my_message) {
-        ASSERT_EQ(-1, s->Write(msg));
-    } else {
-        ASSERT_EQ(-1, s->Write(&src));
-    }
-    ASSERT_EQ(ECONNREFUSED, errno);
+            if (use_my_message) {
+                ASSERT_EQ(-1, s->Write(msg));
+            } else {
+                ASSERT_EQ(-1, s->Write(&src));
+            }
+            ASSERT_EQ(ECONNREFUSED, errno);
 #endif
-    ASSERT_TRUE(src.empty());
+        ASSERT_TRUE(src.empty());
+    } else {
+        ASSERT_EQ(0, s->SetFailed(ECONNREFUSED, "Fail to connect to %s",
+                                  s->description().c_str()));
+    }
+
     ASSERT_EQ(-1, s->fd());
     ASSERT_TRUE(global_sock);
     brpc::SocketUniquePtr invalid_ptr;
@@ -758,7 +772,6 @@ TEST_F(SocketTest, health_check) {
         ASSERT_LT(butil::gettimeofday_us(),
                   start_time + kCheckInteval * 1000000L + 100000L/*100ms*/);
     }
-    //ASSERT_EQ(2, nref);
     ASSERT_TRUE(global_sock);
 
     int fd = 0;
@@ -795,6 +808,7 @@ TEST_F(SocketTest, health_check) {
     ASSERT_EQ(-1, fcntl(listening_fd, F_GETFD));
     ASSERT_EQ(EBADF, errno);
 
+    main_socket_mode_ptr.reset();
     ASSERT_EQ(0, brpc::Socket::SetFailed(id));
     // StartHealthCheck is possibly still addressing the Socket.
     start_time = butil::gettimeofday_us();
@@ -807,6 +821,14 @@ TEST_F(SocketTest, health_check) {
     // The id is invalid.
     brpc::SocketUniquePtr ptr;
     ASSERT_EQ(-1, brpc::Socket::Address(id, &ptr));
+}
+
+TEST_F(SocketTest, health_check) {
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            test_health_check(i, j);
+        }
+    }
 }
 
 void* Writer(void* void_arg) {
@@ -1707,4 +1729,82 @@ TEST_F(SocketTest, packed_ptr) {
     ptr.reset_ptr_and_extra();
     ASSERT_EQ(nullptr, ptr.get());
     ASSERT_EQ(0, ptr.extra());
+}
+
+TEST_F(SocketTest, main_socket_mode) {
+    // FIXME(gejun): Messenger has to be new otherwise quitting may crash.
+    brpc::Acceptor* messenger = new brpc::Acceptor;
+    const brpc::InputMessageHandler pairs[] = {
+        { brpc::policy::ParseHuluMessage,
+          EchoProcessHuluRequest, NULL, NULL, "dummy_hulu" }
+    };
+
+    int listening_fd = -1;
+    butil::EndPoint point(butil::IP_ANY, 7878);
+    for (int i = 0; i < 100; ++i) {
+        point.port += i;
+        listening_fd = tcp_listen(point);
+        if (listening_fd >= 0) {
+            break;
+        }
+    }
+    ASSERT_GT(listening_fd, 0) << berror();
+    ASSERT_EQ(0, butil::make_non_blocking(listening_fd));
+    ASSERT_EQ(0, messenger->AddHandler(pairs[0]));
+    ASSERT_EQ(0, messenger->StartAccept(listening_fd, -1, NULL, false));
+
+
+    brpc::SocketOptions options;
+    options.remote_side = point;
+    options.main_socket_mode = true;
+
+    brpc::SocketId id = brpc::INVALID_SOCKET_ID;
+    ASSERT_EQ(0, brpc::Socket::Create(options, &id));
+    brpc::SocketUniquePtr s;
+    ASSERT_EQ(0, brpc::Socket::Address(id, &s));
+
+    char buf[64];
+    const size_t meta_len = 4;
+    *(uint32_t*)(buf + 12) = *(uint32_t*)"Meta";
+    const size_t len = snprintf(buf + 12 + meta_len,
+                                sizeof(buf) - 12 - meta_len,
+                                "hello world!");
+    memcpy(buf, "HULU", 4);
+    // HULU uses host byte order directly...
+    *(uint32_t*)(buf + 4) = len + meta_len;
+    *(uint32_t*)(buf + 8) = meta_len;
+
+    butil::IOBuf data;
+    data.append(buf, 12 + meta_len + len);
+    ASSERT_EQ(12 + meta_len + len, data.length());
+    ASSERT_EQ(-1, s->Write(&data));
+    ASSERT_EQ(EINVAL, errno);
+    ASSERT_FALSE(data.empty());
+
+    brpc::SocketUniquePtr ptr;
+    ASSERT_EQ(0, s->GetSocket(brpc::CONNECTION_TYPE_SINGLE, &ptr));
+    ASSERT_NE(id, ptr->id());
+    ASSERT_FALSE(ptr->Failed());
+    ASSERT_EQ(0, ptr->Write(&data));
+    ASSERT_TRUE(data.empty());
+
+    ASSERT_EQ(0, s->GetSocket(brpc::CONNECTION_TYPE_SHORT, &ptr));
+    ASSERT_NE(id, ptr->id());
+    ASSERT_FALSE(ptr->Failed());
+    data.append(buf, 12 + meta_len + len);
+    ASSERT_EQ(0, ptr->Write(&data));
+    ASSERT_TRUE(data.empty());
+
+    ASSERT_EQ(0, s->GetSocket(brpc::CONNECTION_TYPE_POOLED, &ptr));
+    ASSERT_NE(id, ptr->id());
+    ASSERT_FALSE(ptr->Failed());
+    data.append(buf, 12 + meta_len + len);
+    ASSERT_EQ(0, ptr->Write(&data));
+    ASSERT_TRUE(data.empty());
+
+    messenger->StopAccept(0);
+    messenger->Join();
+    ASSERT_EQ(-1, messenger->listened_fd());
+    ASSERT_EQ(-1, fcntl(listening_fd, F_GETFD));
+    ASSERT_EQ(EBADF, errno);
 }

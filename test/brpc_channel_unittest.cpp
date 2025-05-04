@@ -1883,7 +1883,7 @@ protected:
         cntl.Reset();
         cntl.set_max_retry(RETRY_NUM);
         CallMethod(&channel, &cntl, &req, &res, async);
-        EXPECT_EQ(EHOSTDOWN, cntl.ErrorCode());
+        EXPECT_EQ(ECONNREFUSED, cntl.ErrorCode());
         EXPECT_EQ(RETRY_NUM, cntl.retried_count());
     }
 
@@ -2743,7 +2743,7 @@ TEST_F(ChannelTest, authentication_selective) {
 }
 
 TEST_F(ChannelTest, retry) {
-    for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
+    for (int i = 0; i <= 1; ++i) { // Flag SingleServer
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
             for (int k = 0; k <=1; ++k) { // Flag ShortConnection
                 TestRetry(i, j, k);

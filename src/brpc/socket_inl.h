@@ -45,7 +45,8 @@ inline void Socket::SetLogOff() {
 
 inline bool Socket::IsAvailable() const {
     return !_logoff_flag.load(butil::memory_order_relaxed) &&
-        (_ninflight_app_health_check.load(butil::memory_order_relaxed) == 0);
+           (_main_socket_mode ||
+            _ninflight_app_health_check.load(butil::memory_order_relaxed) == 0);
 }
 
 static const uint32_t EOF_FLAG = (1 << 31);

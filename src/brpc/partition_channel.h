@@ -36,8 +36,7 @@ struct Partition {
     // Index of the partition kind, counting from 0.
     int index;
 
-    // Number of partition kinds, a partition kind may have more than one
-    // instances.
+    // Number of partition kinds, a partition kind may have more than one instance.
     int num_partition_kinds;
 };
 
