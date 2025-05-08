@@ -638,7 +638,7 @@ PassiveStatus<std::string> g_username("process_username", get_username, NULL);
 ```
 
 # bvar::GFlag
-Expose important gflags as bvar so that they're monitored.
+将重要的gflags曝光为bvar，以便对其进行监控。
 ```c++
 DEFINE_int32(my_flag_that_matters, 8, "...");
 
@@ -649,4 +649,41 @@ static bvar::GFlag s_gflag_my_flag_that_matters("my_flag_that_matters");
 
 // Expose the gflag as a bvar named "foo_bar_my_flag_that_matters".
 static bvar::GFlag s_gflag_my_flag_that_matters_with_prefix("foo_bar", "my_flag_that_matters");
+```
+
+# bvar::Combiner<Value, Item>
+
+Combiner可以线程安全地将Item聚合成Value。用户需要实现Value的Submit函数和Merge函数。
+```c++
+struct Item {
+    int key;
+    int value;
+};
+
+struct Map {
+public:
+    void Submit(const Item& item) {
+        map[item.key] += item.value;
+    }
+
+    void Merge(const Map& other) {
+        for (const auto& it : other.map) {
+            map[it.first] += it.second;
+        }
+    }
+
+private:
+    std::unordered_map<int, int> map;
+};
+
+bvar::Combiner<Map, Item> combiner;
+combiner << Item{1, 10} << Item{2, 20} << Item{1, 5};
+
+combiner.get_value_with_callback([](Map& map) {
+    // Do something with `map'.
+});
+
+Map map;
+map = combiner.get_value();
+map = combiner.get_and_reset_value();
 ```

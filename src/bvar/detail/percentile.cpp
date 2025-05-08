@@ -117,10 +117,10 @@ Percentile &Percentile::operator<<(int64_t latency) {
         // overall distribution of other values too much.
         if (!_debug_name.empty()) {
             LOG(WARNING) << "Input=" << latency << " to `" << _debug_name
-                       << "' is negative, drop";
+                         << "' is negative, drop";
         } else {
             LOG(WARNING) << "Input=" << latency << " to Percentile("
-                       << (void*)this << ") is negative, drop";
+                         << (void*)this << ") is negative, drop";
         }
         return *this;
     }

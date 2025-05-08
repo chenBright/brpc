@@ -17,8 +17,8 @@
 
 // Date 2014/09/22 11:57:43
 
-#ifndef  BVAR_COMBINER_H
-#define  BVAR_COMBINER_H
+#ifndef  BVAR_DETAILE_COMBINER_H
+#define  BVAR_DETAILE_COMBINER_H
 
 #include <string>                       // std::string
 #include <vector>                       // std::vector
@@ -92,6 +92,7 @@ public:
     template <typename Op, typename T1>
     void modify(const Op &op, const T1 &value2) {
         butil::AutoLock guard(_lock);
+        LOG(INFO) << 1111;
         call_op_returning_void(op, _value, value2);
     }
 
@@ -254,6 +255,22 @@ friend class GlobalValue<self_type>;
         return ret;
     }
 
+    // [Threadsafe] May be called from anywhere
+    template<typename Callback>
+    void combine_agents_with_callback(bool reset_tls, Callback&& callback) {
+        ElementTp tls_value;
+        butil::AutoLock guard(_lock);
+        for (auto node = _agents.head(); node != _agents.end(); node = node->next()) {
+            if (reset_tls) {
+                node->value()->element.exchange(&tls_value, _element_identity);
+            } else {
+                node->value()->element.load(&tls_value);
+            }
+            call_op_returning_void(_op, _global_result, tls_value);
+        }
+        callback(_global_result);
+    }
+
     typename butil::add_cr_non_integral<ElementTp>::type
     element_identity() const { return _element_identity; }
     typename butil::add_cr_non_integral<ResultTp>::type
@@ -351,4 +368,4 @@ private:
 }  // namespace detail
 }  // namespace bvar
 
-#endif  // BVAR_COMBINER_H
+#endif  // BVAR_DETAILE_COMBINER_H

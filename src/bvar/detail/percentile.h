@@ -30,6 +30,7 @@
 #include "bvar/reducer.h"               // Reducer
 #include "bvar/window.h"                // Window
 #include "bvar/detail/combiner.h"       // AgentCombiner
+#include "bvar/combiner.h"       // AgentCombiner
 #include "bvar/detail/sampler.h"        // ReducerSampler
 #include "butil/fast_rand.h"
 
