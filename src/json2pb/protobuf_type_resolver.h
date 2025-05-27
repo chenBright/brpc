@@ -31,8 +31,9 @@ namespace json2pb {
 #define PROTOBUF_TYPE_URL_PREFIX "type.googleapis.com"
 
 inline std::string GetTypeUrl(const google::protobuf::Message& message) {
-    return butil::string_printf(PROTOBUF_TYPE_URL_PREFIX"/%s",
-                                message.GetDescriptor()->full_name().c_str());
+    std::string type_url = PROTOBUF_TYPE_URL_PREFIX;
+    type_url.append(message.GetDescriptor()->full_name());
+    return type_url;
 }
 
 // unique_ptr deleter for TypeResolver only deletes the object
