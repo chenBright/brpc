@@ -2145,7 +2145,7 @@ void IOBufAsZeroCopyOutputStream::BackUp(int count) {
     LOG_IF(FATAL, count != 0) << "BackUp an empty IOBuf";
 }
 
-google::protobuf::int64 IOBufAsZeroCopyOutputStream::ByteCount() const {
+int64_t IOBufAsZeroCopyOutputStream::ByteCount() const {
     return _byte_count;
 }
 

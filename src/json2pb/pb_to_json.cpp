@@ -352,6 +352,14 @@ bool ProtoMessageToJson(const google::protobuf::Message& message,
 bool ProtoMessageToProtoJson(const google::protobuf::Message& message,
                              google::protobuf::io::ZeroCopyOutputStream* json,
                              const Pb2ProtoJsonOptions& options, std::string* error) {
+#if GOOGLE_PROTOBUF_VERSION >= 6031000
+    auto st = google::protobuf::util::MessageToJson(message, json, options);
+    bool ok = st.ok();
+    if (!ok && NULL != error) {
+        *error = st.ToString();
+    }
+    return st.ok();
+#else
     butil::IOBuf buf;
     butil::IOBufAsZeroCopyOutputStream output_stream(&buf);
     if (!message.SerializeToZeroCopyStream(&output_stream)) {
@@ -368,6 +376,7 @@ bool ProtoMessageToProtoJson(const google::protobuf::Message& message,
         *error = st.ToString();
     }
     return ok;
+#endif // GOOGLE_PROTOBUF_VERSION >= 6031000
 }
 
 bool ProtoMessageToProtoJson(const google::protobuf::Message& message, std::string* json,

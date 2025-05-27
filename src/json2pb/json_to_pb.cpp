@@ -52,8 +52,10 @@
             perr->append(", ", 2);                                      \
         }                                                               \
         butil::string_appendf(perr, fmt, ##__VA_ARGS__);                \
-        if ((pb) != nullptr) {                                            \
-            butil::string_appendf(perr, " [%s]", (pb)->GetDescriptor()->name().c_str());  \
+        if ((pb) != nullptr) {                                          \
+            perr->append("[");                                          \
+            perr->append((pb)->GetDescriptor()->name());                \
+            perr->append("]");                                          \
         }                                                               \
     } else { }
 
@@ -572,7 +574,7 @@ bool JsonValueToProtoMessage(const BUTIL_RAPIDJSON_NAMESPACE::Value& json_value,
     for (size_t i = 0; i < fields.size(); ++i) {
         const google::protobuf::FieldDescriptor* field = fields[i];
         
-        const std::string& orig_name = field->name();
+        const std::string orig_name = field->name();
         bool res = decode_name(orig_name, field_name_str_temp); 
         const std::string& field_name_str = (res ? field_name_str_temp : orig_name);
 
@@ -719,6 +721,14 @@ bool ProtoJsonToProtoMessage(google::protobuf::io::ZeroCopyInputStream* json,
                              google::protobuf::Message* message,
                              const ProtoJson2PbOptions& options,
                              std::string* error) {
+#if GOOGLE_PROTOBUF_VERSION >= 6031000
+    auto st = google::protobuf::json::JsonStreamToMessage(json, message, options);
+    bool ok = st.ok();
+    if (!ok && NULL != error) {
+        *error = st.ToString();
+    }
+    return st.ok();
+#else
     TypeResolverUniqueptr type_resolver = GetTypeResolver(*message);
     std::string type_url = GetTypeUrl(*message);
     butil::IOBuf buf;
@@ -739,6 +749,7 @@ bool ProtoJsonToProtoMessage(google::protobuf::io::ZeroCopyInputStream* json,
         *error = "Fail to ParseFromCodedStream";
     }
     return ok;
+#endif // GOOGLE_PROTOBUF_VERSION >= 6031000
 }
 
 bool ProtoJsonToProtoMessage(const std::string& json, google::protobuf::Message* message,
