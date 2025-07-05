@@ -266,9 +266,12 @@ GFLAGS_HDR=$(find_dir_of_header_or_die gflags/gflags.h)
 
 PROTOBUF_HDR=$(find_dir_of_header_or_die google/protobuf/message.h)
 PROTOBUF_VERSION=$(grep '#define GOOGLE_PROTOBUF_VERSION [0-9]\+' $PROTOBUF_HDR/google/protobuf/stubs/common.h | awk '{print $3}')
-if [ "$PROTOBUF_VERSION" -ge 4022000 ]; then
+# 如果protobuf版本大于等于4.22.0或者$WITH_BTHREAD_TRACER不等于0，则需要链接absl库
+if [ "$PROTOBUF_VERSION" -ge 4022000 ] || [ $WITH_BTHREAD_TRACER != 0 ]; then
     ABSL_HDR=$(find_dir_of_header_or_die absl/base/config.h)
     ABSL_LIB=$(find_dir_of_lib_or_die absl_strings)
+    ABSL_LIB=$(find_dir_of_lib_or_die absl_stacktrace)
+    ABSL_LIB=$(find_dir_of_lib_or_die absl_symbolize)
     ABSL_TARGET_NAMES="
         absl_bad_optional_access
         absl_bad_variant_access
@@ -336,12 +339,22 @@ if [ "$PROTOBUF_VERSION" -ge 4022000 ]; then
         absl_time
         absl_time_zone
     "
+    if [ -f $ABSL_LIB/libabsl_strings.a ]; then
+        STATIC_LINKINGS="$STATIC_LINKINGS -Wl,--start-group"
+    else
+        DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -Wl,--start-group"
+    fi
     for i in $ABSL_TARGET_NAMES; do
         # ignore interface targets
         if [ -n "$(find_dir_of_lib $i)" ]; then
             append_linking "$ABSL_LIB" "$i"
         fi
     done
+    if [ -f $ABSL_LIB/libabsl_strings.a ]; then
+        STATIC_LINKINGS="$STATIC_LINKINGS -Wl,--end-group"
+    else
+        DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -Wl,--end-group"
+    fi
     CXXFLAGS="-std=c++17"
 else
     CXXFLAGS="-std=c++0x"
