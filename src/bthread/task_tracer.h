@@ -18,17 +18,13 @@
 #ifndef BTHREAD_TASK_TRACER_H
 #define BTHREAD_TASK_TRACER_H
 
-#ifdef BRPC_BTHREAD_TRACER
+// #ifdef BRPC_BTHREAD_TRACER
 
 #include <signal.h>
-#include <semaphore.h>
-#include <vector>
-#include <algorithm>
 #include <libunwind.h>
 #include "butil/strings/safe_sprintf.h"
 #include "butil/synchronization/condition_variable.h"
 #include "butil/shared_object.h"
-#include "butil/fd_utility.h"
 #include "bthread/task_meta.h"
 #include "bthread/mutex.h"
 
@@ -78,18 +74,18 @@ private:
         std::string OutputToString();
         void OutputToStream(std::ostream& os);
 
-        bool OK() const { return err_count == 0; }
-
         static constexpr size_t MAX_TRACE_NUM = 64;
         static constexpr size_t MAX_ERROR_NUM = 2;
 
-        unw_word_t ips[MAX_TRACE_NUM];
+        void* ips[MAX_TRACE_NUM];
         char mangled[MAX_TRACE_NUM][256]{};
         size_t frame_count{0};
         char err_msg[MAX_ERROR_NUM][64]{};
         size_t err_count{0};
 
-        bool fast_unwind{false};
+        bool fast_unwind{true};
+    // private:
+        void Symbolize();
     };
 
     // For signal trace.
@@ -97,13 +93,8 @@ private:
         ~SignalSync() override;
         bool Init();
 
-        unw_context_t* context{NULL};
-        sem_t sem{};
-        int pipe_fds[2]{};
-
-    private:
-        bool _pipe_init{false};
-        bool _sem_init{false};
+        Result result{};
+        int pipe_fds[2]{-1, -1};
     };
 
     static TaskStatus WaitForJumping(TaskMeta* m);
@@ -111,16 +102,11 @@ private:
 
     unw_cursor_t MakeCursor(bthread_fcontext_t fcontext);
     Result ContextTrace(bthread_fcontext_t fcontext);
+    static Result TraceByUnwind(unw_cursor_t& cursor);
 
     static bool RegisterSignalHandler();
     static void SignalHandler(int sig, siginfo_t* info, void* context);
-    static bool WaitForSignalHandler(butil::intrusive_ptr<SignalSync> signal_sync,
-                                     const timespec* abs_timeout, Result& result);
-    static void WakeupSignalHandler(
-        butil::intrusive_ptr<SignalSync> signal_sync, Result& result);
     Result SignalTrace(pid_t worker_tid);
-
-    static Result TraceCore(unw_cursor_t& cursor);
 
     // Make sure only one bthread is traced at a time.
     bthread::Mutex _trace_request_mutex;
@@ -138,6 +124,6 @@ private:
 
 } // namespace bthread
 
-#endif // BRPC_BTHREAD_TRACER
+// #endif // BRPC_BTHREAD_TRACER
 
 #endif // BRPC_BTHREAD_TRACER_H
