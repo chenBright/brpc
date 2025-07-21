@@ -380,6 +380,16 @@ using result_of = std::result_of<F>;
 #error Only C++11 or later is supported.
 #endif // __cplusplus
 
+#if __cplusplus >= 201703L
+template <typename T>
+using void_t = std::void_t<T>;
+#elif __cplusplus >= 201103L
+template<typename... >
+using void_t = void;
+#else
+#error Only C++11 or later is supported.
+#endif // __cplusplus >= 201703L
+
 template <typename F>
 using result_of_t = typename result_of<F>::type;
 
