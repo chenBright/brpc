@@ -373,6 +373,10 @@ cc_library(
         "src/bvar/utils/*.h",
         "src/bvar/detail/*.h",
     ]),
+    defines = [] + select({
+        "//bazel/config:with_babylon_counter": ["WITH_BABYLON_COUNTER=1"],
+        "//conditions:default": [],
+    }),
     copts = COPTS + select({
         "//bazel/config:brpc_build_for_unittest": [
             "-DBVAR_NOT_LINK_DEFAULT_VARIABLES",
@@ -387,7 +391,10 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":butil",
-    ],
+    ]  + select({
+        "//bazel/config:with_babylon_counter": ["@babylon//:concurrent_counter"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
