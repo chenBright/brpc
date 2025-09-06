@@ -221,10 +221,10 @@ Set-Content BUILD.boost -Value $content -Encoding UTF8
 )
 
 http_archive(
-    name = "com_google_absl",  # 2021-09-27T18:06:52Z
-    sha256 = "2f0d9c7bc770f32bda06a9548f537b63602987d5a173791485151aba28a90099",
-    strip_prefix = "abseil-cpp-7143e49e74857a009e16c51f6076eb197b6ccb49",
-    urls = ["https://github.com/abseil/abseil-cpp/archive/7143e49e74857a009e16c51f6076eb197b6ccb49.zip"],
+    name = 'com_google_absl',
+    urls = ['https://github.com/abseil/abseil-cpp/archive/refs/tags/20220623.1.tar.gz'],
+    strip_prefix = 'abseil-cpp-20220623.1',
+    sha256 = '91ac87d30cc6d79f9ab974c51874a704de9c2647c40f6932597329a282217ba8',
 )
 
 http_archive(
@@ -277,6 +277,22 @@ http_archive(
     sha256 = "d5883566d161f8f6ddd4e21f3a9e3e6b8272799d054820f1c25b11e86718f86b",
     strip_prefix = "thrift-0.15.0",
     urls = ["https://archive.apache.org/dist/thrift/0.15.0/thrift-0.15.0.tar.gz"],
+)
+
+http_archive(
+    name = 'babylon',
+    urls = ['https://github.com/baidu/babylon/releases/download/v1.4.3/v1.4.3.tar.gz'],
+    strip_prefix = 'babylon-1.4.3',
+    sha256 = '88c2b933a5d031ec7f528e27f75e3904f4a0c63aef8f9109170414914041d0ec',
+)
+
+# For babylon.
+http_archive(
+    name = 'fmt',
+    urls = ['https://github.com/fmtlib/fmt/archive/refs/tags/8.1.1.tar.gz'],
+    strip_prefix = 'fmt-8.1.1',
+    sha256 = '3d794d3cf67633b34b2771eb9f073bde87e846e0d395d254df7b211ef1ec7346',
+    build_file = "//bazel/third_party/fmt:BUILD.bazel",
 )
 
 #
