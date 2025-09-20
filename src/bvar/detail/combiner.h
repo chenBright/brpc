@@ -209,7 +209,7 @@ friend class GlobalValue<self_type>;
             if (NULL == c) {
                 c = combiner.lock();
             }
-            if (NULL != c) {
+            if (BAIDU_LIKELY(NULL != c)) {
                 GlobalValue<self_type> g(this, c.get());
                 element.merge_global(op, g);
             }

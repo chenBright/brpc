@@ -50,12 +50,12 @@ public:
         if (cntl->thrift_method_name() == "Echo") {
             // Proxy request/response to RealEcho, note that as a proxy we 
             // don't need to Cast the messages to native types.
-            brpc::Controller cntl;
+            brpc::Controller call_cntl;
             brpc::ThriftStub stub(&_channel);
             // TODO: Following Cast<> drops data field from ProxyRequest which
             // does not recognize the field, should be debugged further.
             // LOG(INFO) << "req=" << *req->Cast<example::ProxyRequest>();
-            stub.CallMethod("RealEcho", &cntl, req, res, NULL);
+            stub.CallMethod("RealEcho", &call_cntl, req, res, NULL);
             done->Run();
         } else if (cntl->thrift_method_name() == "RealEcho") {
             return RealEcho(cntl, req->Cast<example::EchoRequest>(),

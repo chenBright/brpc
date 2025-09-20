@@ -510,7 +510,7 @@ private:
     }
 
 private:
-    bool pop_free_chunk(FreeChunk& c) {
+    static bool pop_free_chunk(FreeChunk& c) {
         // Critical for the case that most return_object are called in
         // different threads of get_object.
         if (_free_chunks.empty()) {
@@ -530,7 +530,7 @@ private:
         return true;
     }
 
-    bool push_free_chunk(const FreeChunk& c) {
+    static bool push_free_chunk(const FreeChunk& c) {
         DynamicFreeChunk* p = (DynamicFreeChunk*)malloc(
             offsetof(DynamicFreeChunk, ids) + sizeof(*c.ids) * c.nfree);
         if (!p) {
@@ -553,8 +553,8 @@ private:
     static pthread_mutex_t _change_thread_mutex;
     static butil::static_atomic<BlockGroup*> _block_groups[RP_MAX_BLOCK_NGROUP];
 
-    std::vector<DynamicFreeChunk*> _free_chunks;
-    pthread_mutex_t _free_chunks_mutex;
+    static std::vector<DynamicFreeChunk*> _free_chunks;
+    static pthread_mutex_t _free_chunks_mutex;
 
 #ifdef BUTIL_RESOURCE_POOL_NEED_FREE_ITEM_NUM
     static butil::static_atomic<size_t> _global_nfree;
@@ -593,6 +593,12 @@ pthread_mutex_t ResourcePool<T>::_change_thread_mutex =
 template <typename T>
 butil::static_atomic<typename ResourcePool<T>::BlockGroup*>
 ResourcePool<T>::_block_groups[RP_MAX_BLOCK_NGROUP] = {};
+
+template <typename T>
+std::vector<typename ResourcePool<T>::DynamicFreeChunk*> ResourcePool<T>::_free_chunks;
+
+template <typename T>
+pthread_mutex_t ResourcePool<T>::_free_chunks_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #ifdef BUTIL_RESOURCE_POOL_NEED_FREE_ITEM_NUM
 template <typename T>

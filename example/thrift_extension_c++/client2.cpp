@@ -26,9 +26,12 @@
 #include <brpc/channel.h>
 #include <brpc/thrift_message.h>
 #include <bvar/bvar.h>
+#include <thrift/transport/TBufferTransports.h>
+#include <thrift/protocol/TJSONProtocol.h>
+// #include <thrift/protocol/TSimpleJSONProtocol.h>
 
 DEFINE_int32(thread_num, 50, "Number of threads to send requests");
-DEFINE_bool(use_bthread, false, "Use bthread to send requests");
+DEFINE_bool(use_bthread, true, "Use bthread to send requests");
 DEFINE_int32(request_size, 16, "Bytes of each request");
 DEFINE_string(connection_type, "", "Connection type. Available values: single, pooled, short");
 DEFINE_string(server, "0.0.0.0:8019", "IP Address of server");
@@ -36,7 +39,7 @@ DEFINE_string(load_balancer, "", "The algorithm for load balancing");
 DEFINE_int32(timeout_ms, 100, "RPC timeout in milliseconds");
 DEFINE_int32(max_retry, 3, "Max retries(not including the first RPC)"); 
 DEFINE_bool(dont_fail, false, "Print fatal when some call failed");
-DEFINE_int32(dummy_port, -1, "Launch dummy server at this port");
+DEFINE_int32(dummy_port, 32111, "Launch dummy server at this port");
 
 std::string g_request;
 
@@ -48,15 +51,28 @@ static void* sender(void* arg) {
     // a stub Service wrapping it. stub can be shared by all threads as well.
     brpc::ThriftStub stub(static_cast<brpc::Channel*>(arg));
 
+    // We will receive response synchronously, safe to put variables
+    // on stack.
+    example::EchoRequest req;
+    example::EchoResponse res;
+    req.__set_data(g_request);
+    req.__set_need_by_proxy(10);
+    std::map<int32_t, bool>  map_data;
+    map_data[1] = true;
+    map_data[2] = false;
+    req.__set_map_data(map_data);
+
+    using namespace apache::thrift;
+    auto memBuffer = std::make_shared<transport::TMemoryBuffer>();
+    auto protocol = std::make_shared<protocol::TJSONProtocol>(memBuffer);
+
+    req.write(protocol.get());  // 结构体序列化为JSON
+    // uint8_t* buf;
+    // uint32_t sz;
+    // memBuffer->getBuffer(&buf, &sz);
+    LOG(INFO) << "Serialized request: " << memBuffer->getBufferAsString();
     while (!brpc::IsAskedToQuit()) {
-        // We will receive response synchronously, safe to put variables
-        // on stack.
-        example::EchoRequest req;
-        example::EchoResponse res;
         brpc::Controller cntl;
-        
-        req.__set_data(g_request);
-        req.__set_need_by_proxy(10);
         
         // Because `done'(last parameter) is NULL, this function waits until
         // the response comes back or error occurs(including timedout).
@@ -71,6 +87,7 @@ static void* sender(void* arg) {
             // is a specific sleeping to prevent this thread from spinning too
             // fast. You should continue the business logic in a production 
             // server rather than sleeping.
+            LOG(ERROR) << cntl.ErrorText();
             bthread_usleep(50000);
         }
     }
@@ -142,6 +159,7 @@ int main(int argc, char* argv[]) {
             bthread_join(bids[i], NULL);
         }
     }
+
 
     return 0;
 }

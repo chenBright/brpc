@@ -928,6 +928,15 @@ ssize_t IOBuf::cut_multiple_into_SSL_channel(SSL* ssl, IOBuf* const* pieces,
         }
     }
 
+    int rc = ssl_flush(ssl, ssl_error);
+    if (rc <= 0) {
+        return rc;
+    }
+
+    return nw;
+}
+
+int IOBuf::ssl_flush(SSL* ssl, int* ssl_error) {
 #ifndef USE_MESALINK
     // BIO is disabled for now (see socket.cpp) and the following implementation is
     // NOT correct since it doesn't handle the EAGAIN event of BIO_flush
@@ -947,8 +956,7 @@ ssize_t IOBuf::cut_multiple_into_SSL_channel(SSL* ssl, IOBuf* const* pieces,
         return rc;
     }
 #endif
-
-    return nw;
+    return 1;
 }
 
 ssize_t IOBuf::pcut_multiple_into_file_descriptor(
