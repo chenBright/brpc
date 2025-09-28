@@ -20,41 +20,26 @@ licenses(["notice"])  # Apache v2
 
 exports_files(["LICENSE"])
 
+DEFINES = [
+    "BTHREAD_USE_FAST_PTHREAD_MUTEX",
+    "__const__=__unused__",
+    "__STDC_FORMAT_MACROS",
+    "__STDC_LIMIT_MACROS",
+    "__STDC_CONSTANT_MACROS",
+] + select({
+    "//bazel/config:brpc_with_glog": ["BRPC_WITH_GLOG=1"],
+    "//conditions:default": ["BRPC_WITH_GLOG=0"],
+}) + select({
+  "//bazel/config:brpc_with_no_pthread_mutex_hook": ["NO_PTHREAD_MUTEX_HOOK"],
+  "//conditions:default": [],
+})
+
 COPTS = [
-    "-DBTHREAD_USE_FAST_PTHREAD_MUTEX",
-    "-D__const__=__unused__",
     "-D_GNU_SOURCE",
     "-DUSE_SYMBOLIZE",
     "-DNO_TCMALLOC",
-    "-D__STDC_FORMAT_MACROS",
-    "-D__STDC_LIMIT_MACROS",
-    "-D__STDC_CONSTANT_MACROS",
 ] + select({
-    "//bazel/config:brpc_with_glog": ["-DBRPC_WITH_GLOG=1"],
-    "//conditions:default": ["-DBRPC_WITH_GLOG=0"],
-}) + select({
-    "//bazel/config:brpc_with_mesalink": ["-DUSE_MESALINK"],
-    "//conditions:default": [""],
-}) + select({
-    "//bazel/config:brpc_with_thrift": ["-DENABLE_THRIFT_FRAMED_PROTOCOL=1"],
-    "//conditions:default": [""],
-}) + select({
-    "//bazel/config:brpc_with_thrift_legacy_version": [],
-    "//conditions:default": ["-DTHRIFT_STDCXX=std"],
-}) + select({
-    "//bazel/config:brpc_with_rdma": ["-DBRPC_WITH_RDMA=1"],
-    "//conditions:default": [""],
-}) + select({
-    "//bazel/config:brpc_with_debug_bthread_sche_safety": ["-DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=1"],
-    "//conditions:default": ["-DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=0"],
-}) + select({
-    "//bazel/config:brpc_with_debug_lock": ["-DBRPC_DEBUG_LOCK=1"],
-    "//conditions:default": ["-DBRPC_DEBUG_LOCK=0"],
-}) + select({
     "//bazel/config:brpc_with_asan": ["-fsanitize=address"],
-    "//conditions:default": [""],
-}) + select({
-    "//bazel/config:brpc_with_no_pthread_mutex_hook": ["-DNO_PTHREAD_MUTEX_HOOK"],
     "//conditions:default": [""],
 })
 
@@ -330,6 +315,7 @@ cc_library(
         "src/butil/third_party/dmg_fp/dtoa.cc",
         ":config_h",
     ],
+    defines = DEFINES,
     copts = COPTS + select({
         "//bazel/config:brpc_build_for_unittest": [
             "-DBVAR_NOT_LINK_DEFAULT_VARIABLES",
@@ -405,7 +391,7 @@ cc_library(
     ]),
     defines = [] + select({
         "//bazel/config:brpc_with_bthread_tracer": [
-            "-DBRPC_BTHREAD_TRACER",
+            "BRPC_BTHREAD_TRACER",
         ],
         "//conditions:default": [],
     }),
