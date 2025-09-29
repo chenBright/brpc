@@ -90,6 +90,13 @@ http_archive(
 )
 
 http_archive(
+    name = "rules_python",
+    sha256 = "9d04041ac92a0985e344235f5d946f71ac543f1b1565f2cdbc9a2aaee8adf55b",
+    strip_prefix = "rules_python-0.26.0",
+    url = "https://github.com/bazelbuild/rules_python/releases/download/0.26.0/rules_python-0.26.0.tar.gz",
+)
+
+http_archive(
     name = "rules_perl",  # 2021-09-23T03:21:58Z
     sha256 = "55fbe071971772758ad669615fc9aac9b126db6ae45909f0f36de499f6201dd3",
     strip_prefix = "rules_perl-2f4f36f454375e678e81e5ca465d4d497c5c02da",
@@ -120,20 +127,6 @@ rules_foreign_cc_dependencies(register_preinstalled_tools = False)
 #
 # C++ Dependencies
 #
-# Ordered lexicographical.
-#
-
-http_archive(
-    name = "boost",  # 2021-08-05T01:30:05Z
-    build_file = "@com_github_nelhage_rules_boost//:BUILD.boost",
-    patch_cmds = ["rm -f doc/pdf/BUILD"],
-    patch_cmds_win = ["Remove-Item -Force doc/pdf/BUILD"],
-    sha256 = "5347464af5b14ac54bb945dc68f1dd7c56f0dad7262816b956138fc53bcc0131",
-    strip_prefix = "boost_1_77_0",
-    urls = [
-        "https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz",
-    ],
-)
 
 http_archive(
     name = "com_github_gflags_gflags",  # 2018-11-11T21:30:10Z
@@ -206,25 +199,19 @@ http_archive(
 )
 
 http_archive(
-    name = "com_github_nelhage_rules_boost",  # 2021-08-27T15:46:06Z
-    patch_cmds = ["sed -i 's/net_zlib_zlib/com_github_madler_zlib/g' BUILD.boost"],
-    patch_cmds_win = [
-        """$content = (Get-Content 'BUILD.boost') -replace "net_zlib_zlib", "com_github_madler_zlib"
-Set-Content BUILD.boost -Value $content -Encoding UTF8
-""",
-    ],
-    sha256 = "2d0b2eef7137730dbbb180397fe9c3d601f8f25950c43222cb3ee85256a21869",
-    strip_prefix = "rules_boost-fce83babe3f6287bccb45d2df013a309fa3194b8",
-    urls = [
-        "https://github.com/nelhage/rules_boost/archive/fce83babe3f6287bccb45d2df013a309fa3194b8.tar.gz",
-    ],
+    name = 'com_github_nelhage_rules_boost',
+    urls = ['https://github.com/nelhage/rules_boost/archive/4ab574f9a84b42b1809978114a4664184716f4bf.tar.gz'],
+    strip_prefix = 'rules_boost-4ab574f9a84b42b1809978114a4664184716f4bf',
+    sha256 = '2215e6910eb763a971b1f63f53c45c0f2b7607df38c96287666d94d954da8cdc',
 )
+load('@com_github_nelhage_rules_boost//:boost/boost.bzl', 'boost_deps')
+boost_deps()
 
 http_archive(
-    name = "com_google_absl",  # 2021-09-27T18:06:52Z
-    sha256 = "2f0d9c7bc770f32bda06a9548f537b63602987d5a173791485151aba28a90099",
-    strip_prefix = "abseil-cpp-7143e49e74857a009e16c51f6076eb197b6ccb49",
-    urls = ["https://github.com/abseil/abseil-cpp/archive/7143e49e74857a009e16c51f6076eb197b6ccb49.zip"],
+    name = "com_google_absl",
+    urls = ["https://github.com/abseil/abseil-cpp/releases/download/20240116.0/abseil-cpp-20240116.0.tar.gz"],
+    strip_prefix = "abseil-cpp-20240116.0",
+    sha256 = "338420448b140f0dfd1a1ea3c3ce71b3bc172071f24f4d9a57d59b45037da440",
 )
 
 http_archive(
@@ -235,23 +222,16 @@ http_archive(
 )
 
 http_archive(
-    name = "com_google_protobuf",  # 2021-10-29T00:04:02Z
-    build_file = "//bazel/third_party/protobuf:protobuf.BUILD",
-    patch_cmds = [
-        "sed -i protobuf.bzl -re '4,4d;417,508d'",
-    ],
-    patch_cmds_win = [
-        """$content = Get-Content 'protobuf.bzl' | Where-Object {
-    -not ($_.ReadCount -ne 4) -and
-    -not ($_.ReadCount -ge 418 -and $_.ReadCount -le 509)
-}
-Set-Content protobuf.bzl -Value $content -Encoding UTF8
-""",
-    ],
-    sha256 = "87407cd28e7a9c95d9f61a098a53cf031109d451a7763e7dd1253abf8b4df422",
-    strip_prefix = "protobuf-3.19.1",
-    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.19.1.tar.gz"],
+    name = "com_google_protobuf",
+    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v27.3/protobuf-27.3.tar.gz"],
+    strip_prefix = "protobuf-27.3",
+    sha256 = "1535151efbc7893f38b0578e83cac584f2819974f065698976989ec71c1af84a",
 )
+load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
+protobuf_deps()
+
+load("@rules_python//python:repositories.bzl", "py_repositories")
+py_repositories()
 
 http_archive(
     name = "openssl",  # 2021-12-14T15:45:01Z
@@ -277,6 +257,38 @@ http_archive(
     sha256 = "d5883566d161f8f6ddd4e21f3a9e3e6b8272799d054820f1c25b11e86718f86b",
     strip_prefix = "thrift-0.15.0",
     urls = ["https://archive.apache.org/dist/thrift/0.15.0/thrift-0.15.0.tar.gz"],
+)
+
+# For babylon.
+http_archive(
+    name = "fmt",
+    urls = ["https://github.com/fmtlib/fmt/archive/refs/tags/8.1.1.tar.gz"],
+    strip_prefix = "fmt-8.1.1",
+    sha256 = "3d794d3cf67633b34b2771eb9f073bde87e846e0d395d254df7b211ef1ec7346",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+licenses(["notice"])
+
+cc_library(
+   name = "fmt",
+   srcs = [
+       "src/format.cc",
+       "src/os.cc",
+   ],
+   hdrs = glob([
+       "include/fmt/*.h",
+   ]),
+   includes = ["include"],
+)
+"""
+)
+
+http_archive(
+    name = "babylon",
+    urls = ["https://github.com/baidu/babylon/releases/download/v1.4.4/v1.4.4.tar.gz"],
+    strip_prefix = "babylon-1.4.4",
+    sha256 = "9eaf834e20c235ea2b86e626739e95bf02c23f852e02d50fbd390d8c89ee1d74",
 )
 
 #

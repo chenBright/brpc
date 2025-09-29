@@ -103,23 +103,21 @@ jobs:
         protobuf-install-dir: /protobuf-3.21.12
         config-brpc-options: --cc=gcc --cxx=g++ --werror
 
-  gcc-compile-with-bazel:
+  gcc-compile-with-bazel-workspace:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v2
+    - run: bazel build --enable_bzlmod=false --verbose_failures -- //... -//example/...
+    - run: bazel build --enable_bzlmod=false --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
+    - run: bazel build --enable_bzlmod=false --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true --define with_babylon_counter=true -- //... -//example/...
+
+  gcc-compile-with-bazel-bzlmod:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
     - run: bazel build --verbose_failures -- //... -//example/...
-
-  gcc-compile-with-boringssl:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
     - run: bazel build --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
-
-  gcc-compile-with-bazel-all-options:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true -- //... -//example/...
+    - run: bazel build --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true --define with_babylon_counter=true -- //... -//example/...
 
   clang-compile-with-make-protobuf:
     runs-on: ubuntu-22.04
@@ -151,23 +149,21 @@ jobs:
         protobuf-install-dir: /protobuf-3.21.12
         config-brpc-options: --cc=clang --cxx=clang++ --werror
 
-  clang-compile-with-bazel:
+  clang-compile-with-bazel-workspace:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --action_env=CC=clang -- //... -//example/...
+      - uses: actions/checkout@v2
+      - run: bazel build --enable_bzlmod=false --verbose_failures --action_env=CC=clang -- //... -//example/...
+      - run: bazel build --enable_bzlmod=false --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
+      - run: bazel build --enable_bzlmod=false --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true --define with_babylon_counter=true -- //... -//example/...
 
-  clang-compile-with-boringssl:
+  clang-compile-with-bazel-bzlmod:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
-
-  clang-compile-with-bazel-all-options:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true -- //... -//example/...
+      - uses: actions/checkout@v2
+      - run: bazel build --verbose_failures --action_env=CC=clang -- //... -//example/...
+      - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
+      - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define with_debug_bthread_sche_safety=true --define with_debug_lock=true --define with_asan=true --define with_babylon_counter=true -- //... -//example/...
 
   clang-unittest:
     runs-on: ubuntu-22.04
