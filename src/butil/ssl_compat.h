@@ -27,7 +27,7 @@
 #define BRPC_INLINE inline
 #else
 #define BRPC_INLINE static
-#endif
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 199901L/*C99*/
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 
@@ -112,7 +112,7 @@ BRPC_INLINE int RSA_set0_crt_params(RSA *r, BIGNUM *dmp1, BIGNUM *dmq1, BIGNUM *
     return 1;
 }
 
-BRPC_INLINE void RSA_get0_key(const RSA *r, 
+BRPC_INLINE void RSA_get0_key(const RSA *r,
         const BIGNUM **n, const BIGNUM **e, const BIGNUM **d) {
     if (n != NULL)
         *n = r->n;
@@ -324,7 +324,7 @@ BRPC_INLINE int RSA_bits(const RSA *r) {
 
 #endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 
-#if OPENSSL_VERSION_NUMBER < 0x0090801fL || defined (OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER < 0x0090801fL || defined(OPENSSL_IS_BORINGSSL)
 BRPC_INLINE BIGNUM* get_rfc2409_prime_1024(BIGNUM* bn) {
     static const unsigned char RFC2409_PRIME_1024[] = {
         0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xC9,0x0F,0xDA,0xA2,
@@ -512,11 +512,18 @@ BRPC_INLINE BIGNUM* get_rfc3526_prime_8192(BIGNUM* bn) {
     return BN_bin2bn(RFC3526_PRIME_8192, sizeof(RFC3526_PRIME_8192), bn);
 }
 
+// In Bazel WORKSPACE mode, the OPENSSL_IS_BORINGSSL macro also exists
+// when using OpenSSL, which causes the compilation error :
+// invalid use of incomplete type 'const EVP_PKEY' {aka 'const struct evp_pkey_st'}.
+// To distinguish between OpenSSL and BoringSSL, a new OPENSSL_IS_OPENSSL macro is
+// added in Bazel WORKSPACE mode.
+#ifndef OPENSSL_IS_OPENSSL
 BRPC_INLINE int EVP_PKEY_base_id(const EVP_PKEY *pkey) {
     return EVP_PKEY_type(pkey->type);
 }
+#endif
 
-#endif /* OPENSSL_VERSION_NUMBER < 0x0090801fL || OPENSSL_IS_BORINGSSL */
+#endif // OPENSSL_VERSION_NUMBER < 0x0090801fL || (defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_OPENSSL))
 
 #if defined(OPENSSL_IS_BORINGSSL)
 BRPC_INLINE int BIO_fd_non_fatal_error(int err) {
