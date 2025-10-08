@@ -197,6 +197,7 @@ TEST_F(LockTimerTest, double_lock_time) {
     ASSERT_EQ(OPS_PER_THREAD * ARRAY_SIZE(threads), (size_t)r1.count());
     LOG(INFO) << r0;
     LOG(INFO) << r1._latency;
+#if !WITH_BABYLON_COUNTER
     r0.reset();
     r1._latency.reset();
     DoubleLockArg<M1, M0> arg1;
@@ -213,6 +214,7 @@ TEST_F(LockTimerTest, double_lock_time) {
     ASSERT_EQ(OPS_PER_THREAD * ARRAY_SIZE(threads), (size_t)r1.count());
     LOG(INFO) << r0;
     LOG(INFO) << r1._latency;
+#endif // WITH_BABYLON_COUNTER
 }
 
 TEST_F(LockTimerTest, overhead) {
