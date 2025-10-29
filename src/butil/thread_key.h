@@ -118,7 +118,7 @@ class ThreadLocal {
         void replace(T* old_ptr, T* new_ptr) {
             BAIDU_SCOPED_LOCK(mutex);
             auto it = std::find(ptrs.begin(), ptrs.end(), old_ptr);
-            CHECK_NE(it, ptrs.end());
+            CHECK(it != ptrs.end());
             *it = new_ptr;
         }
 

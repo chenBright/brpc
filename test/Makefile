@@ -185,6 +185,9 @@ TEST_BRPC_OBJS = $(addsuffix .o, $(basename $(TEST_BRPC_SOURCES)))
 TEST_PROTO_SOURCES = $(wildcard *.proto)
 TEST_PROTO_OBJS = $(TEST_PROTO_SOURCES:.proto=.pb.o)
 
+TEST_THRIFT_SOURCES = "gen-cpp/"
+TEST_THRIFT_OBJS = "$(TEST_THRIFT_SOURCES)/echo_types.o"
+
 TEST_BINS = test_butil test_bvar $(TEST_BTHREAD_SOURCES:.cpp=) $(TEST_BRPC_SOURCES:.cpp=)
 
 .PHONY:all
@@ -193,7 +196,7 @@ all: $(TEST_BINS)
 .PHONY:clean
 clean:clean_bins
 	@echo "> Cleaning"
-	rm -rf $(TEST_BUTIL_OBJS) $(TEST_BVAR_OBJS) $(TEST_BTHREAD_OBJS) $(TEST_BRPC_OBJS) $(TEST_PROTO_OBJS) $(TEST_PROTO_SOURCES:.proto=.pb.h) $(TEST_PROTO_SOURCES:.proto=.pb.cc)
+	rm -rf $(TEST_BUTIL_OBJS) $(TEST_BVAR_OBJS) $(TEST_BTHREAD_OBJS) $(TEST_BRPC_OBJS) $(TEST_PROTO_OBJS) $(TEST_PROTO_SOURCES:.proto=.pb.h) $(TEST_PROTO_SOURCES:.proto=.pb.cc) $(TEST_THRIFT_SOURCES)
 	$(MAKE) -C.. clean_debug
 
 .PHONY:clean_bins
@@ -234,7 +237,7 @@ else ifeq ($(SYSTEM),Darwin)
 	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) $^ $(GTEST_STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
 endif
 
-brpc_%_unittest:$(TEST_PROTO_OBJS) brpc_%_unittest.o | libbrpc.dbg.$(SOEXT)
+brpc_%_unittest:$(TEST_PROTO_OBJS) $(TEST_THRIFT_OBJS) brpc_%_unittest.o | libbrpc.dbg.$(SOEXT)
 	@echo "> Linking $@"
 ifeq ($(SYSTEM),Linux)
 	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) -Xlinker "-(" $^ -Xlinker "-)" $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
@@ -245,6 +248,10 @@ endif
 %.pb.cc %.pb.h:%.proto
 	@echo "> Generating $@"
 	$(PROTOC) --cpp_out=. --proto_path=. --proto_path=../src --proto_path=$(PROTOBUF_HDR) $<
+
+gen-cpp/echo_types.cpp gen-cpp/echo_types.h: echo.thrift
+	@echo "> Generating $@"
+	$(THRIFT) --gen cpp $<
 
 baidu_time_unittest.o:baidu_time_unittest.cpp | libbrpc.dbg.$(SOEXT)
 	@echo "> Compiling $@"
@@ -259,6 +266,10 @@ brpc_h2_unsent_message_unittest.o:brpc_h2_unsent_message_unittest.cpp | libbrpc.
 	$(CXX) -c $(HDRPATHS) $(CXXFLAGS) $< -o $@
 
 %.o:%.cc | libbrpc.dbg.$(SOEXT)
+	@echo "> Compiling $@"
+	$(CXX) -c $(HDRPATHS) $(CXXFLAGS) $< -o $@
+
+echo_types.o:gen-cpp/echo_types.cpp | libbrpc.dbg.$(SOEXT)
 	@echo "> Compiling $@"
 	$(CXX) -c $(HDRPATHS) $(CXXFLAGS) $< -o $@
 

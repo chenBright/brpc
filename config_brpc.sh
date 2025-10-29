@@ -231,6 +231,7 @@ append_linking $GFLAGS_LIB gflags
 
 PROTOBUF_LIB=$(find_dir_of_lib_or_die protobuf)
 append_linking $PROTOBUF_LIB protobuf
+PROTOC=$(find_bin_or_die protoc)
 
 LEVELDB_LIB=$(find_dir_of_lib_or_die leveldb)
 # required by leveldb
@@ -259,8 +260,6 @@ if [ -f $LEVELDB_LIB/libleveldb.a ]; then
 else
 	DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -lleveldb"
 fi
-
-PROTOC=$(find_bin_or_die protoc)
 
 GFLAGS_HDR=$(find_dir_of_header_or_die gflags/gflags.h)
 
@@ -460,6 +459,7 @@ if [ "$SYSTEM" = "Darwin" ]; then
 fi
 
 if [ $WITH_THRIFT != 0 ]; then
+    append_to_output "THRIFT=$(find_bin_or_die protoc)"
     THRIFT_LIB=$(find_dir_of_lib_or_die thriftnb)
     THRIFT_HDR=$(find_dir_of_header_or_die thrift/Thrift.h)
     append_to_output_libs "$THRIFT_LIB"
