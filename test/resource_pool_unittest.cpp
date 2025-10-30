@@ -266,6 +266,9 @@ TEST_F(ResourcePoolTest, get_perf) {
             get_resource(&id);
         }
         tm1.stop();
+        for (size_t i = 0; i < N; ++i) {
+            return_resource(id);
+        }
         printf("get a SilentObj takes %luns\n", tm1.n_elapsed()/N);
         //clear_resources<SilentObj>(); // free all blocks
         

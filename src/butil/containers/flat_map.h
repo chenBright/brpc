@@ -173,7 +173,7 @@ public:
     ~FlatMap();
 
     FlatMap& operator=(const FlatMap& rhs);
-    void swap(FlatMap & rhs);
+    void swap(FlatMap & rhs) noexcept;
 
     // FlatMap will be automatically initialized with small FlatMap optimization,
     // so this function only needs to be call when a large initial number of

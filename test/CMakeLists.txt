@@ -42,6 +42,19 @@ compile_proto(PROTO_HDRS PROTO_SRCS ${CMAKE_BINARY_DIR}/test
                                     "${TEST_PROTO_FILES}")
 add_library(TEST_PROTO_LIB OBJECT ${PROTO_SRCS} ${PROTO_HDRS})
 
+# Search for libthrift* by best effort. If it is not found and brpc is
+# compiled with thrift protocol enabled, a link error would be reported.
+find_library(THRIFT_LIB NAMES thrift)
+if (NOT THRIFT_LIB)
+    message(FATAL_ERROR "Fail to find thrift")
+endif()
+
+execute_process(
+    COMMAND thrift -o ${CMAKE_CURRENT_BINARY_DIR} --gen cpp ${CMAKE_CURRENT_SOURCE_DIR}/echo.thrift
+)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/gen-cpp)
+add_library(THRIFT_TYPE_LIB OBJECT ${CMAKE_CURRENT_BINARY_DIR}/gen-cpp/echo_types.cpp)
+
 set(BRPC_SYSTEM_GTEST_SOURCE_DIR "" CACHE PATH "System googletest source directory.")
 
 if(DOWNLOAD_GTEST)
@@ -171,6 +184,7 @@ SET(TEST_BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/test/flat_map_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/crc32c_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/iobuf_unittest.cpp
+    ${PROJECT_SOURCE_DIR}/test/resource_pool_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/object_pool_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/test_switches.cc
     ${PROJECT_SOURCE_DIR}/test/scoped_locale.cc
@@ -206,7 +220,8 @@ set_property(TARGET ${SOURCES_DEBUG_LIB} PROPERTY POSITION_INDEPENDENT_CODE 1)
 
 add_library(brpc-shared-debug SHARED $<TARGET_OBJECTS:BUTIL_DEBUG_LIB>
                                      $<TARGET_OBJECTS:SOURCES_DEBUG_LIB>
-                                     $<TARGET_OBJECTS:PROTO_LIB>)
+                                     $<TARGET_OBJECTS:PROTO_LIB>
+                                     $<TARGET_OBJECTS:THRIFT_TYPE_LIB>)
 # change the debug lib output dir to be different from the release output
 set_target_properties(brpc-shared-debug PROPERTIES
          LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/test)
