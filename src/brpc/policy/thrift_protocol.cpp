@@ -572,10 +572,28 @@ void ProcessThriftRequest(InputMessageBase* msg_base) {
 void ProcessThriftResponse(InputMessageBase* msg_base) {
     const int64_t start_parse_us = butil::cpuwide_time_us();
     DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
-    
-    // Fetch correlation id that we saved before in `PacThriftRequest'
-    const CallId cid = { static_cast<uint64_t>(msg->socket()->correlation_id()) };
+    // The following code was taken from thrift auto generate code
+    std::string fname;
+    ::apache::thrift::protocol::TMessageType mtype;
+    uint32_t seq_id = 0;
+    butil::Status st = ReadThriftMessageBegin(&msg->payload, &fname, &mtype, &seq_id);
+
+    // Fetch correlation id that we saved before in `PackThriftRequest'.
     Controller* cntl = NULL;
+    uint64_t cid_value = msg->socket()->correlation_id();
+    if (0 == cid_value) {
+        if (!st.ok()) {
+            LOG_EVERY_SECOND(WARNING) << "Fail to read thrift message begin: " << st.error_cstr();
+            return;
+        }
+
+        if (!msg->socket()->Sid2Cid(seq_id, &cid_value)) {
+            LOG_EVERY_SECOND(WARNING) << "Fail to convert seq_id=" << seq_id << " to cid";
+            return;
+        }
+    }
+
+    CallId cid = {cid_value};
     const int rc = bthread_id_lock(cid, (void**)&cntl);
     if (rc != 0) {
         LOG_IF(ERROR, rc != EINVAL && rc != EPERM)
@@ -594,12 +612,6 @@ void ProcessThriftResponse(InputMessageBase* msg_base) {
 
     const int saved_error = cntl->ErrorCode();
     do {
-        // The following code was taken from thrift auto generate code
-        std::string fname;
-        ::apache::thrift::protocol::TMessageType mtype;
-        uint32_t seq_id = 0; // unchecked
-        
-        butil::Status st = ReadThriftMessageBegin(&msg->payload, &fname, &mtype, &seq_id);
         if (!st.ok()) {
             cntl->SetFailed(ERESPONSE, "%s", st.error_cstr());
             break;
@@ -683,12 +695,12 @@ void SerializeThriftRequest(butil::IOBuf* request_buf, Controller* cntl,
     // xxx_pargs write
     if (req->raw_instance()) {
         auto out_buffer =
-            THRIFT_STDCXX::make_shared<apache::thrift::transport::TMemoryBuffer>();
+            THRIFT_STDCXX::make_shared<apache::thrift::transport::TMemoryBuffer>(8192);
         apache::thrift::protocol::TBinaryProtocolT<apache::thrift::transport::TMemoryBuffer> oprot(out_buffer);
 
-        oprot.writeMessageBegin(
-            method_name, ::apache::thrift::protocol::T_CALL, 0/*seq_id*/);
-
+        // The message begin will be written in `PackThriftRequest'.
+        // oprot.writeMessageBegin(
+            // method_name, ::apache::thrift::protocol::T_CALL, 0/*seq_id*/);
         uint32_t xfer = 0;
         char struct_begin_str[32 + method_name.size()];
         char* p = struct_begin_str;
@@ -711,7 +723,7 @@ void SerializeThriftRequest(butil::IOBuf* request_buf, Controller* cntl,
         xfer += oprot.writeStructEnd();
         (void)xfer;
 
-        oprot.writeMessageEnd();
+        // oprot.writeMessageEnd();
         oprot.getTransport()->writeEnd();
         oprot.getTransport()->flush();
 
@@ -719,48 +731,57 @@ void SerializeThriftRequest(butil::IOBuf* request_buf, Controller* cntl,
         uint32_t sz;
         out_buffer->getBuffer(&buf, &sz);
 
-        const thrift_head_t head = { htonl(sz) };
-        request_buf->append(&head, sizeof(head));
-        request_buf->append(buf, sz);
+        // const thrift_head_t head = { htonl(sz) };
+        // request_buf->append(&head, sizeof(head));
+        // request_buf->append(buf, sz);
+        request_buf->append_user_data(buf, sz, [out_buffer](void*) { (void)out_buffer; });
     } else {
-        const size_t mb_size = ThriftMessageBeginSize(method_name);
-        char buf[sizeof(thrift_head_t) + mb_size];
-        // suppress strict-aliasing warning
-        thrift_head_t* head = (thrift_head_t*)buf;
-        head->body_len = htonl(mb_size + req->body.size());
-        WriteThriftMessageBegin(buf + sizeof(thrift_head_t), method_name,
-                                ::apache::thrift::protocol::T_CALL, 0/*seq_id*/);
-        request_buf->append(buf, sizeof(buf));
+        // const size_t mb_size = ThriftMessageBeginSize(method_name);
+        // char buf[sizeof(thrift_head_t) + mb_size];
+        // // suppress strict-aliasing warning
+        // thrift_head_t* head = (thrift_head_t*)buf;
+        // head->body_len = htonl(mb_size + req->body.size());
+        // WriteThriftMessageBegin(buf + sizeof(thrift_head_t), method_name,
+        //                         ::apache::thrift::protocol::T_CALL, 0/*seq_id*/);
+        // request_buf->append(buf, sizeof(buf));
         request_buf->append(req->body);
     }
 }
 
-void PackThriftRequest(
-    butil::IOBuf* packet_buf,
-    SocketMessage**,
-    uint64_t correlation_id,
-    const google::protobuf::MethodDescriptor*,
-    Controller* cntl,
-    const butil::IOBuf& request,
-    const Authenticator*) {
+void PackThriftRequest(butil::IOBuf* packet_buf, SocketMessage**, uint64_t correlation_id,
+                       const google::protobuf::MethodDescriptor*, Controller* cntl,
+                       const butil::IOBuf& request, const Authenticator*) {
     ControllerPrivateAccessor accessor(cntl);
-    if (cntl->connection_type() == CONNECTION_TYPE_SINGLE) {
+    uint32_t seq_id = 0;
+    if (CONNECTION_TYPE_SINGLE != cntl->connection_type()) {
+        // Store `correlation_id' into the socket since thrift protocol can't pack the field.
+        accessor.get_sending_socket()->set_correlation_id(correlation_id);
+    } else if (!accessor.get_sending_socket()->Cid2Sid(correlation_id, &seq_id)) {
         return cntl->SetFailed(
-            EINVAL, "thrift protocol can't work with CONNECTION_TYPE_SINGLE");
+            EINVAL, "Fail to convert correlation_id=%llu", correlation_id);
     }
-    // Store `correlation_id' into the socket since thrift protocol can't
-    // pack the field.
-    accessor.get_sending_socket()->set_correlation_id(correlation_id);
+
+    // Pack message begin.
+    const std::string& method_name = cntl->thrift_method_name();
+    const size_t mb_size = ThriftMessageBeginSize(method_name);
+    char buf[sizeof(thrift_head_t) + mb_size];
+    // Suppress strict-aliasing warning.
+    thrift_head_t* head = (thrift_head_t*)buf;
+    head->body_len = htonl(mb_size + request.size());
+    WriteThriftMessageBegin(buf + sizeof(thrift_head_t), method_name,
+                            ::apache::thrift::protocol::T_CALL, seq_id);
+    packet_buf->append(buf, sizeof(buf));
+    // Message body.
+    packet_buf->append(request);
 
     Span* span = accessor.span();
     if (span) {
-        span->set_request_size(request.length());
+        span->set_request_size(packet_buf->length());
         // TODO: Nowhere to set tracing ids.
         // request_meta->set_trace_id(span->trace_id());
         // request_meta->set_span_id(span->span_id());
         // request_meta->set_parent_span_id(span->parent_span_id());
     }
-    packet_buf->append(request);
 }
 
 } // namespace policy

@@ -330,7 +330,7 @@ int FlatMap<_K, _T, _H, _E, _S, _A, _M>::init(size_t nbucket, u_int load_factor)
 template <typename _K, typename _T, typename _H, typename _E,
           bool _S, typename _A, bool _M>
 void FlatMap<_K, _T, _H, _E, _S, _A, _M>::swap(
-    FlatMap<_K, _T, _H, _E, _S, _A, _M>& rhs) {
+    FlatMap<_K, _T, _H, _E, _S, _A, _M>& rhs) noexcept {
     if (!is_default_buckets() && !rhs.is_default_buckets()) {
         std::swap(rhs._buckets, _buckets);
         std::swap(rhs._thumbnail, _thumbnail);

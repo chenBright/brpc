@@ -18,16 +18,21 @@
 #ifndef  BUTIL_THREAD_KEY_H
 #define  BUTIL_THREAD_KEY_H
 
-#include <limits>
 #include <pthread.h>
 #include <stdlib.h>
+#include <limits>
 #include <vector>
+#include <functional>
+#include <memory>
+
 #include "butil/scoped_lock.h"
 #include "butil/type_traits.h"
+#include "butil/shared_object.h"
+#include "butil/synchronization/lock.h"
 
 namespace butil {
 
-typedef void (*DtorFunction)(void *);
+using DtorFunction = std::function<void(void*)>;
 
 class ThreadKey {
 public:
@@ -95,18 +100,98 @@ void* thread_getspecific(ThreadKey& thread_key);
 
 template <typename T>
 class ThreadLocal {
+    class InternalObject {
+    public:
+        template <typename Callback>
+        void for_each(Callback&& callback) {
+            BAIDU_SCOPED_LOCK(mutex);
+            for (auto ptr : ptrs) {
+                callback(ptr);
+            }
+        }
+
+        void push(T* ptr) {
+            BAIDU_SCOPED_LOCK(mutex);
+            ptrs.push_back(ptr);
+        }
+
+        void replace(T* old_ptr, T* new_ptr) {
+            BAIDU_SCOPED_LOCK(mutex);
+            auto it = std::find(ptrs.begin(), ptrs.end(), old_ptr);
+            CHECK(it != ptrs.end());
+            *it = new_ptr;
+        }
+
+        void remove(T* ptr) {
+            // Remove and delete old_ptr.
+            if (NULL == ptr) {
+                return;
+            }
+            BAIDU_SCOPED_LOCK(mutex);
+            auto iter = std::find(ptrs.begin(), ptrs.end(), ptr);
+            if (iter != ptrs.end()) {
+                ptrs.erase(iter, ptrs.end());
+                delete ptr;
+            }
+        }
+
+        void remove_all() {
+            BAIDU_SCOPED_LOCK(mutex);
+            for (auto ptr : ptrs) {
+                delete ptr;
+            }
+        }
+
+    private:
+        Mutex mutex;
+        // All pointers of data allocated by the ThreadLocal.
+        std::vector<T*> ptrs;
+    };
+
 public:
     ThreadLocal() : ThreadLocal(false) {}
 
-    explicit ThreadLocal(bool delete_on_thread_exit);
+    explicit ThreadLocal(bool delete_at_thread_exit)
+        : _object(std::make_shared<InternalObject>())
+        , _delete_at_thread_exit(delete_at_thread_exit) {
+        DtorFunction dtor;
+        if (_delete_at_thread_exit) {
+            // Remove and delete the thread local object at thread exit.
+            std::weak_ptr<InternalObject> weak_object(_object);
+            dtor = [weak_object](void* ptr) {
+                auto object = weak_object.lock();
+                if (NULL != object) {
+                    object->remove(static_cast<T*>(ptr));
+                } // else the ThreadLocal is destructed, do nothing.
+            };
+        }
+        CHECK_EQ(0, thread_key_create(_key, dtor));
+    }
 
-    ~ThreadLocal();
+    ~ThreadLocal() {
+        thread_key_delete(_key);
+        _object->remove_all();
+    }
 
-    // non-copyable
-    ThreadLocal(const ThreadLocal&) = delete;
-    ThreadLocal& operator=(const ThreadLocal&) = delete;
+    DISALLOW_COPY(ThreadLocal);
 
-    T* get();
+    // Returns the thread local object if existed, NULL otherwise.
+    T* get_or_null() {
+        return static_cast<T*>(thread_getspecific(_key));
+    }
+
+    // Returns the thread local object, create one if not exist.
+    // Args are passed to T's constructor.
+    template<typename... Args>
+    T* get(Args&&... args) {
+        T* ptr = static_cast<T*>(thread_getspecific(_key));
+        if (NULL == ptr) {
+            ptr = new T(std::forward<Args>(args)...);
+            CHECK_EQ(0, thread_setspecific(_key, ptr));
+            _object->push(ptr);
+        }
+        return ptr;
+    }
 
     T* operator->() { return get(); }
 
@@ -117,104 +202,36 @@ public:
     // will be called under a thread lock.
     template <typename Callback>
     void for_each(Callback&& callback) {
-        BAIDU_CASSERT(
-            (is_result_void<Callback, T*>::value),
-            "Callback must accept Args params and return void");
-        BAIDU_SCOPED_LOCK(_mutex);
-        for (auto ptr : ptrs) {
-            callback(ptr);
-        }
+        BAIDU_CASSERT((is_result_void<Callback, T*>::value),
+                      "Callback must accept Args params and return void");
+        _object->for_each(std::forward<Callback>(callback));
     }
 
-    void reset(T* ptr);
+    // Set the thread local object to `ptr', and delete the old one if any.
+    // If `ptr' is same as the old one, do nothing.
+    void reset(T* ptr) {
+        T* old_ptr = get();
+        if (ptr == old_ptr) {
+            return;
+        }
+        if (thread_setspecific(_key, ptr) != 0) {
+            return;
+        }
+        _object->replace(old_ptr, ptr);
+    }
 
     void reset() {
         reset(NULL);
     }
 
 private:
-    static void DefaultDtor(void* ptr) {
-        if (ptr) {
-            delete static_cast<T*>(ptr);
-        }
-    }
-
     ThreadKey _key;
-    pthread_mutex_t _mutex;
-    // All pointers of data allocated by the ThreadLocal.
-    std::vector<T*> ptrs;
+    std::shared_ptr<InternalObject> _object;
     // Delete data on thread exit or destructor of ThreadLocal.
-    bool _delete_on_thread_exit;
+    bool _delete_at_thread_exit;
 };
 
-template <typename T>
-ThreadLocal<T>::ThreadLocal(bool delete_on_thread_exit)
-        : _mutex(PTHREAD_MUTEX_INITIALIZER)
-        , _delete_on_thread_exit(delete_on_thread_exit) {
-    DtorFunction dtor = _delete_on_thread_exit ? DefaultDtor : NULL;
-    thread_key_create(_key, dtor);
-}
-
-
-template <typename T>
-ThreadLocal<T>::~ThreadLocal() {
-    thread_key_delete(_key);
-    if (!_delete_on_thread_exit) {
-        BAIDU_SCOPED_LOCK(_mutex);
-        for (auto ptr : ptrs) {
-            DefaultDtor(ptr);
-        }
-    }
-    pthread_mutex_destroy(&_mutex);
-}
-
-template <typename T>
-T* ThreadLocal<T>::get() {
-    T* ptr = static_cast<T*>(thread_getspecific(_key));
-    if (!ptr) {
-        ptr = new (std::nothrow) T;
-        if (!ptr) {
-            return NULL;
-        }
-        int rc = thread_setspecific(_key, ptr);
-        if (rc != 0) {
-            DefaultDtor(ptr);
-            return NULL;
-        }
-        {
-            BAIDU_SCOPED_LOCK(_mutex);
-            ptrs.push_back(ptr);
-        }
-    }
-    return ptr;
-}
-
-template <typename T>
-void ThreadLocal<T>::reset(T* ptr) {
-    T* old_ptr = get();
-    if (ptr == old_ptr) {
-        return;
-    }
-    if (thread_setspecific(_key, ptr) != 0) {
-        return;
-    }
-    {
-        BAIDU_SCOPED_LOCK(_mutex);
-        if (ptr) {
-            ptrs.push_back(ptr);
-        }
-        // Remove and delete old_ptr.
-        if (old_ptr) {
-            auto iter = std::remove(ptrs.begin(), ptrs.end(), old_ptr);
-            if (iter != ptrs.end()) {
-                ptrs.erase(iter, ptrs.end());
-            }
-            DefaultDtor(old_ptr);
-        }
-    }
-}
-
-}
+} // namespace butil
 
 
 #endif // BUTIL_THREAD_KEY_H
