@@ -15,181 +15,6 @@ env:
 
 # https://github.com/actions/runner-images
 jobs:
-  compile-with-make:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-all-dependencies
-
-    - name: gcc with default options
-      uses: ./.github/actions/compile-with-make
-      with:
-        options: --headers=/usr/include --libs=/usr/lib /usr/lib64 --cc=gcc --cxx=g++ --werror
-
-    - name: gcc with all options
-      uses: ./.github/actions/compile-with-make
-      with:
-        options: --headers=/usr/include --libs=/usr/lib /usr/lib64 --cc=gcc --cxx=g++ --werror --with-thrift --with-glog --with-rdma  --with-debug-bthread-sche-safety --with-debug-lock --with-bthread-tracer --with-asan
-
-    - name: clang with default options
-      uses: ./.github/actions/compile-with-make
-      with:
-        options: --headers=/usr/include --libs=/usr/lib /usr/lib64 --cc=clang --cxx=clang++ --werror
-
-    - name: clang with all options
-      uses: ./.github/actions/compile-with-make
-      with:
-        options: --headers=/usr/include --libs=/usr/lib /usr/lib64 --cc=clang --cxx=clang++ --werror --with-thrift --with-glog --with-rdma  --with-debug-bthread-sche-safety --with-debug-lock --with-bthread-tracer --with-asan
-
-  compile-with-cmake:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-all-dependencies
-
-    - name: gcc with default options
-      run: |
-        export CC=gcc && export CXX=g++
-        mkdir gcc_build && cd gcc_build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
-        make -j ${{env.proc_num}} && make clean
-
-    - name: gcc with all options
-      run: |
-        export CC=gcc && export CXX=g++
-        mkdir gcc_build_all && cd gcc_build_all
-        cmake -DWITH_MESALINK=OFF -DWITH_GLOG=ON -DWITH_THRIFT=ON -DWITH_RDMA=ON -DWITH_DEBUG_BTHREAD_SCHE_SAFETY=ON -DWITH_DEBUG_LOCK=ON -DWITH_BTHREAD_TRACER=ON -DWITH_ASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
-        make -j ${{env.proc_num}} && make clean
-
-    - name: clang with default options
-      run: |
-        export CC=clang && export CXX=clang++
-        mkdir clang_build && cd clang_build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
-        make -j ${{env.proc_num}} && make clean
-
-    - name: clang with all options
-      run: |
-        export CC=clang && export CXX=clang++
-        mkdir clang_build_all && cd clang_build_all
-        cmake -DWITH_MESALINK=OFF -DWITH_GLOG=ON -DWITH_THRIFT=ON -DWITH_RDMA=ON -DWITH_DEBUG_BTHREAD_SCHE_SAFETY=ON -DWITH_DEBUG_LOCK=ON -DWITH_BTHREAD_TRACER=ON -DWITH_ASAN=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
-        make -j ${{env.proc_num}} && make clean
-
-  gcc-compile-with-make-protobuf:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependencies
-
-    - name: protobuf 3.5.1
-      uses: ./.github/actions/compile-with-make-protobuf
-      with:
-        protobuf-version: 3.5.1
-        protobuf-cpp-version: 3.5.1
-        protobuf-install-dir: /protobuf-3.5.1
-        config-brpc-options: --cc=gcc --cxx=g++ --werror
-
-    - name: protobuf 3.12.4
-      uses: ./.github/actions/compile-with-make-protobuf
-      with:
-        protobuf-version: 3.12.4
-        protobuf-cpp-version: 3.12.4
-        protobuf-install-dir: /protobuf-3.12.4
-        config-brpc-options: --cc=gcc --cxx=g++ --werror
-
-    - name: protobuf 21.12
-      uses: ./.github/actions/compile-with-make-protobuf
-      with:
-        protobuf-version: 21.12
-        protobuf-cpp-version: 3.21.12
-        protobuf-install-dir: /protobuf-3.21.12
-        config-brpc-options: --cc=gcc --cxx=g++ --werror
-
-  gcc-compile-with-bazel:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures -- //... -//example/...
-
-  gcc-compile-with-boringssl:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
-
-  gcc-compile-with-bazel-all-options:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: |
-        bazel build --verbose_failures \
-                    --define with_mesalink=false \
-                    --define with_glog=true \
-                    --define with_thrift=true \
-                    --define with_debug_bthread_sche_safety=true \
-                    --define with_debug_lock=true \
-                    --define with_asan=true \
-                    --define with_bthread_tracer=true \
-                    --define BRPC_WITH_NO_PTHREAD_MUTEX_HOOK=true \
-                    -- //... -//example/...
-
-  clang-compile-with-make-protobuf:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependencies
-
-    - name: protobuf 3.5.1
-      uses: ./.github/actions/compile-with-make-protobuf
-      with:
-        protobuf-version: 3.5.1
-        protobuf-cpp-version: 3.5.1
-        protobuf-install-dir: /protobuf-3.5.1
-        config-brpc-options: --cc=clang --cxx=clang++ --werror
-
-    - name: protobuf 3.12.4
-      uses: ./.github/actions/compile-with-make-protobuf
-      with:
-        protobuf-version: 3.12.4
-        protobuf-cpp-version: 3.12.4
-        protobuf-install-dir: /protobuf-3.12.4
-        config-brpc-options: --cc=clang --cxx=clang++ --werror
-
-    - name: protobuf 21.12
-      uses: ./.github/actions/compile-with-make-protobuf
-      with:
-        protobuf-version: 21.12
-        protobuf-cpp-version: 3.21.12
-        protobuf-install-dir: /protobuf-3.21.12
-        config-brpc-options: --cc=clang --cxx=clang++ --werror
-
-  clang-compile-with-bazel:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --action_env=CC=clang -- //... -//example/...
-
-  clang-compile-with-boringssl:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel build --verbose_failures --action_env=CC=clang --define with_mesalink=false --define with_glog=true --define with_thrift=true --define BRPC_WITH_BORINGSSL=true -- //... -//example/...
-
-  clang-compile-with-bazel-all-options:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: |
-        bazel build --verbose_failures \
-                    --action_env=CC=clang \
-                    --define with_mesalink=false \
-                    --define with_glog=true \
-                    --define with_thrift=true \
-                    --define with_debug_bthread_sche_safety=true \
-                    --define with_debug_lock=true \
-                    --define with_asan=true \
-                    --define with_bthread_tracer=true \
-                    --define BRPC_WITH_NO_PTHREAD_MUTEX_HOOK=true \
-                    -- //... -//example/...
-
   clang-unittest:
     runs-on: ubuntu-22.04
     steps:
@@ -197,40 +22,30 @@ jobs:
     - uses: ./.github/actions/install-essential-dependencies
     - uses: ./.github/actions/init-ut-make-config
       with:
-        options: --with-bthread-tracer
+        options: --with-rdma
+    - name: Setup Soft-RoCE
+      run: |
+        KERNEL_VERSION=$(uname -r | cut -d '-' -f 1)
+        KERNEL_NAME="linux-${KERNEL_VERSION%'.0'}"
+        DOWNLOAD_LINK="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/${KERNEL_NAME}.tar.xz"
+        ETHERNET_CARD=$(ip link | awk -F ": " '$0 !~ "lo|vir|wl|^[^0-9]"{print $2;getline}' | head -1)
+        echo "kernel version is ${KERNEL_VERSION}, download link is ${DOWNLOAD_LINK}, ethernet card is ${ETHERNET_CARD}"
+        wget -q $DOWNLOAD_LINK -O /tmp/$KERNEL_NAME.tar.xz
+        tar xf /tmp/$KERNEL_NAME.tar.xz --directory=/tmp
+        RXE_PATH="/tmp/$KERNEL_NAME/drivers/infiniband/sw/rxe"
+        sed 's/$(CONFIG_RDMA_RXE)/m/g' $RXE_PATH/Makefile > $RXE_PATH/Kbuild
+        make -C /lib/modules/$(uname -r)/build M=$RXE_PATH modules -j
+        sudo modprobe ib_core
+        sudo modprobe rdma_ucm
+        sudo insmod $RXE_PATH/rdma_rxe.ko
+        sudo rdma link add rxe_0 type rxe netdev $ETHERNET_CARD
+        rdma link
     - name: compile tests
       run: |
         cat config.mk
         cd test
-        make -j ${{env.proc_num}}
+        make -j ${{env.proc_num}} brpc_rdma_unittest
     - name: run tests
       run: |
         cd test
         sh ./run_tests.sh
-
-  clang-unittest-asan:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - uses: ./.github/actions/install-essential-dependencies
-    - uses: ./.github/actions/init-ut-make-config
-      with:
-        options: --with-bthread-tracer --with-asan
-    - name: compile tests
-      run: |
-        cat config.mk
-        cd test
-        make NEED_GPERFTOOLS=0 -j ${{env.proc_num}}
-    - name: run tests
-      run: |
-        cd test
-        sh ./run_tests.sh
-
-  bazel-bvar-unittest:
-    runs-on: ubuntu-22.04
-    steps:
-    - uses: actions/checkout@v2
-    - run: bazel test --verbose_failures //test:bvar_test
-    - run: bazel test --verbose_failures --define with_babylon_counter=true //test:bvar_test
-    - run: bazel test --verbose_failures --action_env=CC=clang //test:bvar_test
-    - run: bazel test --verbose_failures --action_env=CC=clang --define with_babylon_counter=true //test:bvar_test

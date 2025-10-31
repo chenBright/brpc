@@ -6,7 +6,7 @@ runs:
   using: "composite"
   steps:
   - run: |
-      sudo apt-get update && sudo apt-get install -y clang-12 lldb-12 lld-12 libgtest-dev cmake gdb libstdc++6-11-dbg
+      sudo apt-get update && sudo apt-get install -y clang-12 lldb-12 lld-12 libgtest-dev cmake gdb libstdc++6-11-dbg libibverbs1 libibverbs-dev
     shell: bash
   - run: |
       cd /usr/src/gtest && export CC=clang-12 && export CXX=clang++-12 && sudo cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 .
