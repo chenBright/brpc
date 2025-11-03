@@ -747,8 +747,9 @@ int Socket::OnCreated(const SocketOptions& options) {
     _auth_flag_error.store(0, butil::memory_order_relaxed);
     const int rc2 = bthread_id_create(&_auth_id, NULL, NULL);
     if (rc2) {
-        LOG(ERROR) << "Fail to create auth_id: " << berror(rc2);
-        SetFailed(rc2, "Fail to create auth_id: %s", berror(rc2));
+        const char* error_text = berror(rc2);
+        LOG(ERROR) << "Fail to create auth_id: " << error_text;
+        SetFailed(rc2, "Fail to create auth_id: %s", error_text);
         return -1;
     }
     _force_ssl = options.force_ssl;
@@ -892,10 +893,12 @@ void Socket::BeforeRecycled() {
     delete _stream_set;
     _stream_set = NULL;
 
+    _cid_resource_pool.clear_resources();
+
     const SocketId asid = _agent_socket_id.load(butil::memory_order_relaxed);
     if (asid != INVALID_SOCKET_ID) {
         SocketUniquePtr ptr;
-        if (Socket::Address(asid, &ptr) == 0) {
+        if (Address(asid, &ptr) == 0) {
             ptr->ReleaseAdditionalReference();
         }
     }
@@ -1131,7 +1134,7 @@ int Socket::SetFailed(int error_code, const char* error_fmt, ...) {
         butil::string_vprintf(&error_text, error_fmt, ap);
         va_end(ap);
     }
-    return VersionedRefWithId<Socket>::SetFailed(error_code, error_text);
+    return VersionedRefWithId::SetFailed(error_code, error_text);
 }
 
 int Socket::SetFailed(SocketId id) {
@@ -1195,9 +1198,9 @@ void* Socket::ProcessEvent(void* arg) {
 // `old_head' is last new_head got from this function or (in another word)
 // tail of current writing list.
 // `singular_node' is true iff `old_head' is the only node in its list.
-bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
+bool Socket::IsWriteComplete(WriteRequest* old_head,
                              bool singular_node,
-                             Socket::WriteRequest** new_tail) {
+                             WriteRequest** new_tail) {
     CHECK(NULL == old_head->next);
     // Try to set _write_head to NULL to mark that the write is done.
     WriteRequest* new_head = old_head;
@@ -1319,7 +1322,7 @@ int Socket::Connect(const timespec* abstime,
         SocketOptions options;
         options.bthread_tag = _io_event.bthread_tag();
         options.user = req;
-        if (Socket::Create(options, &connect_id) != 0) {
+        if (Create(options, &connect_id) != 0) {
             LOG(FATAL) << "Fail to create Socket";
             delete req;
             return -1;
@@ -1328,7 +1331,7 @@ int Socket::Connect(const timespec* abstime,
         // `connect_id'. We hold an additional reference here to
         // ensure `req' to be valid in this scope
         SocketUniquePtr s;
-        CHECK_EQ(0, Socket::Address(connect_id, &s));
+        CHECK_EQ(0, Address(connect_id, &s));
 
         // Add `sockfd' into epoll so that `HandleEpollOutRequest' will
         // be called with `req' when epoll event reaches
@@ -1436,7 +1439,7 @@ int Socket::OnOutputEvent(void* user_data, uint32_t,
     // added into epoll, these sockets miss the signal inside
     // `SetFailed' and therefore must be signalled here using
     // `AddressFailedAsWell' to prevent waiting forever
-    if (Socket::AddressFailedAsWell(id, &s) < 0) {
+    if (AddressFailedAsWell(id, &s) < 0) {
         // Ignore recycled sockets
         return -1;
     }
@@ -1456,7 +1459,7 @@ int Socket::OnOutputEvent(void* user_data, uint32_t,
 void Socket::HandleEpollOutTimeout(void* arg) {
     SocketId id = (SocketId)arg;
     SocketUniquePtr s;
-    if (Socket::Address(id, &s) != 0) {
+    if (Address(id, &s) != 0) {
         return;
     }
     EpollOutRequest* req = dynamic_cast<EpollOutRequest*>(s->user());
@@ -1530,16 +1533,16 @@ int Socket::KeepWriteIfConnected(int fd, int err, void* data) {
         // Run ssl connect in a new bthread to avoid blocking
         // the current bthread (thus blocking the EventDispatcher)
         bthread_t th;
-        std::unique_ptr<google::protobuf::Closure> thrd_func(brpc::NewCallback(
-                Socket::CheckConnectedAndKeepWrite, fd, err, data));
+        std::unique_ptr<google::protobuf::Closure> thrd_func(
+            NewCallback(CheckConnectedAndKeepWrite, fd, err, data));
         if ((err = bthread_start_background(&th, &BTHREAD_ATTR_NORMAL,
                                             RunClosure, thrd_func.get())) == 0) {
             thrd_func.release();
             return 0;
-        } else {
-            PLOG(ERROR) << "Fail to start bthread";
-            // Fall through with non zero `err'
         }
+
+        PLOG(ERROR) << "Fail to start bthread";
+        // Fall through with non zero `err'
     }
     CheckConnectedAndKeepWrite(fd, err, data);
     return 0;
@@ -2316,7 +2319,7 @@ std::ostream& operator<<(std::ostream& os, const ObjectPtr<T>& obj) {
 
 void Socket::DebugSocket(std::ostream& os, SocketId id) {
     SocketUniquePtr ptr;
-    int ret = Socket::AddressFailedAsWell(id, &ptr);
+    int ret = AddressFailedAsWell(id, &ptr);
     if (ret < 0) {
         os << "SocketId=" << id << " is invalid or recycled";
         return;
@@ -2958,6 +2961,27 @@ int Socket::PeekAgentSocket(SocketUniquePtr* out) const {
         return -1;
     }
     return Address(id, out);
+}
+
+bool Socket::Cid2Sid(uint64_t cid, uint32_t* seq_id)  {
+    uint64_t* cid_ptr = _cid_resource_pool.get_resource(seq_id);
+    if (NULL == cid_ptr) {
+        return false;
+    }
+
+    *cid_ptr = cid;
+    return true;
+}
+
+bool Socket::Sid2Cid(uint32_t sid, uint64_t* cid) {
+    uint64_t* cid_ptr = _cid_resource_pool.address_resource(sid);
+    if (NULL == cid_ptr) {
+        return false;
+    }
+
+    *cid = *cid_ptr;
+    _cid_resource_pool.return_resource(sid);
+    return true;
 }
 
 void Socket::GetStat(SocketStat* s) const {

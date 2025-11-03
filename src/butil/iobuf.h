@@ -202,6 +202,8 @@ public:
     static ssize_t cut_multiple_into_SSL_channel(
         struct ssl_st* ssl, IOBuf* const* pieces, size_t count, int* ssl_error);
 
+    static int ssl_flush(struct ssl_st* ssl, int* ssl_error);
+
     // Append another IOBuf to back side, payload of the IOBuf is shared
     // rather than copied.
     void append(const IOBuf& other);
