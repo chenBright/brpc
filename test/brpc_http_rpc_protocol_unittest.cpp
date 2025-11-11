@@ -2020,7 +2020,7 @@ void ReadOneResponse(brpc::SocketUniquePtr& sock,
             continue;
         }
         brpc::ParseResult pr = brpc::policy::ParseHttpMessage(&read_buf, sock.get(), false, NULL);
-        ASSERT_TRUE(pr.error() == brpc::PARSE_ERROR_NOT_ENOUGH_DATA || pr.is_ok());
+        ASSERT_TRUE(pr.error() == brpc::PARSE_ERROR_NOT_ENOUGH_DATA || pr.is_ok()) << pr.error_str();
         if (pr.is_ok()) {
             imsg_guard.reset(static_cast<brpc::policy::HttpContext*>(pr.message()));
             break;
@@ -2044,6 +2044,7 @@ TEST_F(HttpTest, http_expect) {
     ASSERT_EQ(0, brpc::Socket::Create(options, &id));
     brpc::SocketUniquePtr sock;
     ASSERT_EQ(0, brpc::Socket::Address(id, &sock));
+    sock->set_http_request_method(brpc::HTTP_METHOD_POST);
 
     butil::IOBuf content;
     content.append("hello");

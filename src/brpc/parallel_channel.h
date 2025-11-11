@@ -171,7 +171,7 @@ struct ParallelChannelOptions {
     // Default: number of sub channels, meaning that the RPC to ParallChannel
     // does not return unless all sub RPC succeed.
     // Note: `success_limit' is only valid when `fail_limit' is not set.
-    int success_limit{ -1};
+    int success_limit{-1};
 };
 
 // ParallelChannel(aka "pchan") accesses all sub channels simultaneously with

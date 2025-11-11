@@ -44,6 +44,7 @@ int main(int argc, char* argv[]) {
     
     // Initialize the channel, NULL means using default options. 
     brpc::ChannelOptions options;
+    options.connection_type = "single";
     options.protocol = brpc::PROTOCOL_THRIFT;
     options.timeout_ms = FLAGS_timeout_ms/*milliseconds*/;
     options.max_retry = FLAGS_max_retry;

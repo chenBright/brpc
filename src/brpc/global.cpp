@@ -544,7 +544,7 @@ static void GlobalInitializeOrDieImpl() {
         policy::SerializeThriftRequest, policy::PackThriftRequest,
         policy::ProcessThriftRequest, policy::ProcessThriftResponse,
         policy::VerifyThriftRequest, NULL, NULL,
-        CONNECTION_TYPE_POOLED_AND_SHORT, "thrift" };
+        CONNECTION_TYPE_ALL, "thrift" };
     if (RegisterProtocol(PROTOCOL_THRIFT, thrift_binary_protocol) != 0) {
         exit(1);
     }

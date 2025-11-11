@@ -193,7 +193,7 @@ all: $(TEST_BINS)
 .PHONY:clean
 clean:clean_bins
 	@echo "> Cleaning"
-	rm -rf $(TEST_BUTIL_OBJS) $(TEST_BVAR_OBJS) $(TEST_BTHREAD_OBJS) $(TEST_BRPC_OBJS) $(TEST_PROTO_OBJS) $(TEST_PROTO_SOURCES:.proto=.pb.h) $(TEST_PROTO_SOURCES:.proto=.pb.cc)
+	rm -rf $(TEST_BUTIL_OBJS) $(TEST_BVAR_OBJS) $(TEST_BTHREAD_OBJS) $(TEST_BRPC_OBJS) $(TEST_PROTO_OBJS) $(TEST_PROTO_SOURCES:.proto=.pb.h) $(TEST_PROTO_SOURCES:.proto=.pb.cc) gen-cpp
 	$(MAKE) -C.. clean_debug
 
 .PHONY:clean_bins
@@ -234,7 +234,7 @@ else ifeq ($(SYSTEM),Darwin)
 	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) $^ $(GTEST_STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
 endif
 
-brpc_%_unittest:$(TEST_PROTO_OBJS) brpc_%_unittest.o | libbrpc.dbg.$(SOEXT)
+brpc_%_unittest:$(TEST_PROTO_OBJS) gen-cpp/echo_types.o brpc_%_unittest.o | libbrpc.dbg.$(SOEXT)
 	@echo "> Linking $@"
 ifeq ($(SYSTEM),Linux)
 	$(CXX) -o $@ $(LIBPATHS) $(SOPATHS) -Xlinker "-(" $^ -Xlinker "-)" $(STATIC_LINKINGS) $(UT_DYNAMIC_LINKINGS)
@@ -262,3 +262,10 @@ brpc_h2_unsent_message_unittest.o:brpc_h2_unsent_message_unittest.cpp | libbrpc.
 	@echo "> Compiling $@"
 	$(CXX) -c $(HDRPATHS) $(CXXFLAGS) $< -o $@
 
+gen-cpp/%_types.cpp gen-cpp/%_types.h:%.thrift
+	@echo "> Generating Thrift C++ code from $<"
+	thrift --gen cpp $<
+
+gen-cpp/%_types.o:gen-cpp/%_types.cpp
+	@echo "> Compiling $@"
+	$(CXX) -c $(HDRPATHS) -O2 $(CXXFLAGS) $< -o $@

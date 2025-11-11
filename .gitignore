@@ -15,6 +15,7 @@
 *.rej
 /output
 /test/output
+/test/gen-cpp
 build/
 
 # Ignore hidden files

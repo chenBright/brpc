@@ -42,6 +42,7 @@
 #include "brpc/event_dispatcher.h"
 #include "brpc/versioned_ref_with_id.h"
 #include "brpc/health_check_option.h"
+#include "butil/thread_key.h"
 
 namespace brpc {
 namespace policy {
@@ -61,6 +62,283 @@ class Socket;
 class AuthContext;
 class EventDispatcher;
 class Stream;
+
+class CIdResourcePool {
+public:
+    static constexpr  size_t RP_MAX_BLOCK_NGROUP = 65536;
+    static constexpr  size_t RP_GROUP_NBLOCK_NBIT = 16;
+    static constexpr  size_t RP_GROUP_NBLOCK = (1UL << RP_GROUP_NBLOCK_NBIT);
+    static constexpr  size_t RP_INITIAL_FREE_LIST_SIZE = 1024;
+
+    static constexpr  size_t BLOCK_NITEM = 64 * 1024 / sizeof(uint64_t);
+    static constexpr  size_t FREE_CHUNK_NITEM = BLOCK_NITEM;
+    static constexpr  size_t LOCAL_FREE_CHUNK_NITEM = 256;
+
+    // Free identifiers are batched in a FreeChunk before they're added to
+    // global list(_free_chunks).
+    template <size_t NITEM>
+    struct ResourcePoolFreeChunk {
+        size_t nfree{0};
+        uint32_t ids[NITEM]{};
+    };
+
+    typedef ResourcePoolFreeChunk<FREE_CHUNK_NITEM> FreeChunk;
+    typedef ResourcePoolFreeChunk<0> DynamicFreeChunk;
+
+    // When a thread needs memory, it allocates a Block. To improve locality,
+    // items in the Block are only used by the thread.
+    struct BAIDU_CACHELINE_ALIGNMENT Block {
+        uint64_t items[BLOCK_NITEM]{};
+        size_t nitem{0};
+    };
+
+    // A Resource addresses at most RP_MAX_BLOCK_NGROUP BlockGroups,
+    // each BlockGroup addresses at most RP_GROUP_NBLOCK blocks. So a
+    // resource addresses at most RP_MAX_BLOCK_NGROUP * RP_GROUP_NBLOCK Blocks.
+    struct BlockGroup {
+        butil::atomic<size_t> nblock{0};
+        butil::atomic<Block*> blocks[RP_GROUP_NBLOCK]{};
+    };
+
+    // Each thread has an instance of this class.
+    class BAIDU_CACHELINE_ALIGNMENT LocalPool {
+    public:
+        explicit LocalPool(CIdResourcePool* pool)
+            : _pool(pool)
+            , _cur_block(NULL)
+            , _cur_block_index(0) {}
+
+        ~LocalPool() {
+            // Add to global _free_chunks if there're some free resources
+            if (_cur_free.nfree > 0) {
+                _pool->push_free_chunk(_cur_free);
+            }
+
+            // todo
+            // _pool->clear_from_destructor_of_local_pool();
+        }
+
+        void clear_resources() {
+            _cur_free.nfree = 0;
+            _cur_block = NULL;
+            _cur_block_index = 0;
+        }
+
+
+        uint64_t* get(uint32_t* id) {
+            // Fetch local free id.
+            if (_cur_free.nfree) {
+                uint32_t free_id = _cur_free.ids[--_cur_free.nfree];
+                *id = free_id;
+                return _pool->unsafe_address_resource(free_id);
+            }
+            // Fetch a FreeChunk from global.
+            // TODO: Popping from _free needs to copy a FreeChunk which is
+            // costly, but hardly impacts amortized performance.
+            if (_pool->pop_free_chunk(_cur_free)) {
+                --_cur_free.nfree;
+                uint32_t free_id =  _cur_free.ids[_cur_free.nfree];
+                *id = free_id;
+                return _pool->unsafe_address_resource(free_id);
+            }
+            // Fetch memory from local block
+            if (_cur_block && _cur_block->nitem < BLOCK_NITEM) {
+                *id = _cur_block_index * BLOCK_NITEM + _cur_block->nitem;
+                auto item = _cur_block->items + _cur_block->nitem;
+                ++_cur_block->nitem;
+                return item;
+            }
+            // Fetch a Block from global.
+            _cur_block = _pool->add_block(&_cur_block_index);
+            if (NULL != _cur_block) {
+                *id = _cur_block_index * BLOCK_NITEM + _cur_block->nitem;
+                auto item = _cur_block->items + _cur_block->nitem;
+                ++_cur_block->nitem;
+                return item;
+            }
+            return NULL;
+        }
+
+        int return_resource(uint32_t id) {
+            // Return to local free list
+            if (_cur_free.nfree < LOCAL_FREE_CHUNK_NITEM) {
+                _cur_free.ids[_cur_free.nfree++] = id;
+                return 0;
+            }
+            // Local free list is full, return it to global.
+            // For copying issue, check comment in upper get()
+            if (_pool->push_free_chunk(_cur_free)) {
+                _cur_free.nfree = 1;
+                _cur_free.ids[0] = id;
+                return 0;
+            }
+            return -1;
+        }
+
+    private:
+        CIdResourcePool* _pool;
+        Block* _cur_block;
+        size_t _cur_block_index;
+        FreeChunk _cur_free;
+    };
+
+    CIdResourcePool()
+        : _local_pool(true) {
+        _free_chunks.reserve(RP_INITIAL_FREE_LIST_SIZE);
+    }
+
+    ~CIdResourcePool() {
+        clear_resources();
+    }
+
+    uint64_t* unsafe_address_resource(uint32_t id) {
+        const size_t block_index = id / BLOCK_NITEM;
+        return (uint64_t*)(_block_groups[(block_index >> RP_GROUP_NBLOCK_NBIT)]
+            .load(butil::memory_order_consume)
+            ->blocks[(block_index & (RP_GROUP_NBLOCK - 1))]
+            .load(butil::memory_order_consume)->items) +
+                id - block_index * BLOCK_NITEM;
+    }
+
+    uint64_t* address_resource(uint32_t id) {
+        const size_t block_index = id / BLOCK_NITEM;
+        const size_t group_index = (block_index >> RP_GROUP_NBLOCK_NBIT);
+        if (BAIDU_LIKELY(group_index < RP_MAX_BLOCK_NGROUP)) {
+            BlockGroup* bg =
+                _block_groups[group_index].load(butil::memory_order_consume);
+            if (BAIDU_LIKELY(bg != NULL)) {
+                Block* b = bg->blocks[block_index & (RP_GROUP_NBLOCK - 1)]
+                    .load(butil::memory_order_consume);
+                if (BAIDU_LIKELY(b != NULL)) {
+                    const size_t offset = id - block_index * BLOCK_NITEM;
+                    if (BAIDU_LIKELY(offset < b->nitem)) {
+                        return (uint64_t*)b->items + offset;
+                    }
+                }
+            }
+        }
+        return NULL;
+    }
+
+    uint64_t* get_resource(uint32_t* id) {
+        return _local_pool.get(this)->get(id);
+    }
+
+    int return_resource(uint32_t id) {
+        LocalPool* pool = _local_pool.get_or_null();
+        if (NULL == pool) {
+            return -1;
+        }
+        return pool->return_resource(id);;
+    }
+
+    // Clear all resources: LocalPool, DynamicFreeChunk, Block and BlockGroup.
+    void clear_resources() {
+        // todo 析构的时候应该不需要清空local pool，直接析构即可
+        _local_pool.for_each([](LocalPool* lp) {
+            lp->clear_resources();
+        });
+
+        BAIDU_SCOPED_LOCK(_free_chunks_mutex);
+        for (auto& item : _free_chunks) {
+            free(item);
+        }
+        _free_chunks.clear();
+        size_t ngroup = _ngroup.exchange(0, butil::memory_order_acquire);
+        for (size_t i = 0; i < ngroup; ++i) {
+            BlockGroup* group = _block_groups[i].exchange(NULL, butil::memory_order_acquire);
+            if (group != NULL) {
+                for (size_t j = 0; j < group->nblock.load(butil::memory_order_relaxed); ++j) {
+                    delete group->blocks[j].load(butil::memory_order_acquire);
+                }
+                delete group;
+            }
+        }
+    }
+
+    // Create a Block and append it to right-most BlockGroup.
+    Block* add_block(size_t* index) {
+        auto new_block = new Block;
+        size_t ngroup;
+        do {
+            ngroup = _ngroup.load(butil::memory_order_acquire);
+            if (ngroup >= 1) {
+                BlockGroup* g =
+                    _block_groups[ngroup - 1].load(butil::memory_order_consume);
+                size_t block_index =
+                    g->nblock.fetch_add(1, butil::memory_order_relaxed);
+                if (block_index < RP_GROUP_NBLOCK) {
+                    g->blocks[block_index].store(
+                        new_block, butil::memory_order_release);
+                    *index = (ngroup - 1) * RP_GROUP_NBLOCK + block_index;
+                    return new_block;
+                }
+                g->nblock.fetch_sub(1, butil::memory_order_relaxed);
+            }
+            add_block_group(ngroup);
+        } while (true);
+    }
+
+    // Create a BlockGroup and append it to _block_groups.
+    // Shall be called infrequently because a BlockGroup is pretty big.
+    void add_block_group(size_t old_ngroup) {
+        BAIDU_SCOPED_LOCK(_block_group_mutex);
+        const size_t ngroup = _ngroup.load(butil::memory_order_acquire);
+        if (ngroup != old_ngroup) {
+            // Other thread got lock and added group before this thread.
+            return;
+        }
+        if (ngroup < RP_MAX_BLOCK_NGROUP) {
+            // Release fence is paired with consume fence in address() and
+            // add_block() to avoid un-constructed bg to be seen by other
+            // threads.
+            _block_groups[ngroup].store(new BlockGroup, butil::memory_order_release);
+            _ngroup.store(ngroup + 1, butil::memory_order_release);
+        }
+    }
+
+    bool pop_free_chunk(FreeChunk& c) {
+        // Critical for the case that most return_object are called in
+        // different threads of get_object.
+        if (_free_chunks.empty()) {
+            return false;
+        }
+        std::unique_lock<butil::Mutex> lock(_free_chunks_mutex);
+        if (_free_chunks.empty()) {
+            return false;
+        }
+        DynamicFreeChunk* p = _free_chunks.back();
+        _free_chunks.pop_back();
+        lock.unlock();
+
+        c.nfree = p->nfree;
+        memcpy(c.ids, p->ids, sizeof(*p->ids) * p->nfree);
+        free(p);
+        return true;
+    }
+
+    bool push_free_chunk(const FreeChunk& c) {
+        DynamicFreeChunk* p = (DynamicFreeChunk*)malloc(
+            offsetof(DynamicFreeChunk, ids) + sizeof(*c.ids) * c.nfree);
+        if (NULL == p) {
+            return false;
+        }
+        p->nfree = c.nfree;
+        memcpy(p->ids, c.ids, sizeof(*c.ids) * c.nfree);
+        BAIDU_SCOPED_LOCK(_free_chunks_mutex);
+        _free_chunks.push_back(p);
+        return true;
+    }
+
+private:
+    butil::ThreadLocal<LocalPool> _local_pool;
+    butil::atomic<size_t> _ngroup{0};
+    butil::Mutex _block_group_mutex;
+    butil::atomic<BlockGroup*> _block_groups[RP_MAX_BLOCK_NGROUP]{};
+
+    std::vector<DynamicFreeChunk*> _free_chunks;
+    butil::Mutex _free_chunks_mutex;
+};
 
 // A special closure for processing the about-to-recycle socket. Socket does
 // not delete SocketUser, if you want, `delete this' at the end of
@@ -645,6 +923,10 @@ public:
     void set_http_request_method(const HttpMethod& method) { _http_request_method = method; }
     HttpMethod http_request_method() const { return _http_request_method; }
 
+    // Convert between correlation id of Controller and seq id of thrift protocol.
+    bool Cid2Sid(uint64_t cid, uint32_t* seq_id);
+    bool Sid2Cid(uint32_t sid, uint64_t* cid);
+
 private:
     DISALLOW_COPY_AND_ASSIGN(Socket);
 
@@ -980,6 +1262,8 @@ private:
 
     HttpMethod _http_request_method;
     HealthCheckOption _hc_option;
+
+    CIdResourcePool _cid_resource_pool;
 };
 
 } // namespace brpc
