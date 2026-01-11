@@ -718,7 +718,7 @@ int Socket::OnCreated(const SocketOptions& options) {
         return -1;
     }
     _io_event.set_bthread_tag(options.bthread_tag);
-    auto guard = butil::MakeScopeGuard([this] {
+    auto io_event_guard = butil::MakeScopeGuard([this] {
         _io_event.Reset();
     });
 
@@ -759,14 +759,7 @@ int Socket::OnCreated(const SocketOptions& options) {
 #if BRPC_WITH_RDMA
     CHECK(_rdma_ep == NULL);
     if (options.use_rdma) {
-        _rdma_ep = new (std::nothrow)rdma::RdmaEndpoint(this);
-        if (!_rdma_ep) {
-            const int saved_errno = errno;
-            PLOG(ERROR) << "Fail to create RdmaEndpoint";
-            SetFailed(saved_errno, "Fail to create RdmaEndpoint: %s",
-                         berror(saved_errno));
-            return -1;
-        }
+        _rdma_ep = new rdma::RdmaEndpoint(this);
         _rdma_state = RDMA_UNKNOWN;
     } else {
         _rdma_state = RDMA_OFF;
@@ -808,17 +801,23 @@ int Socket::OnCreated(const SocketOptions& options) {
             return -1;
         }
     }
+
+    HoldHCRelatedRef();
+    auto hc_ref_guard = butil::MakeScopeGuard([this] {
+        ReleaseHCRelatedReference();
+    });
+
     // Must be the last one! Internal fields of this Socket may be accessed
     // just after calling ResetFileDescriptor.
     if (ResetFileDescriptor(fd) != 0) {
         const int saved_errno = errno;
         PLOG(ERROR) << "Fail to ResetFileDescriptor";
-        SetFailed(saved_errno, "Fail to ResetFileDescriptor: %s",
-                     berror(saved_errno));
+        SetFailed(saved_errno, "Fail to ResetFileDescriptor: %s", berror(saved_errno));
         return -1;
     }
-    HoldHCRelatedRef();
-    guard.dismiss();
+
+    hc_ref_guard.dismiss();
+    io_event_guard.dismiss();
 
     return 0;
 }
@@ -997,7 +996,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
                      << " was abandoned during health checking";
             return -1;
         } else {
-            // nobody holds a health-checking-related reference,
+            // Nobody holds a health-checking-related reference,
             // so no need to do health checking.
             if (!_is_hc_related_ref_held) {
                 RPC_VLOG << "Nobody holds a health-checking-related reference"

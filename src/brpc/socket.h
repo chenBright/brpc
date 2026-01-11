@@ -420,9 +420,6 @@ public:
 
     // True if health checking is enabled.
     bool HCEnabled() const {
-        // This fence makes sure that we see change of
-        // `_is_hc_related_ref_held' before changing `_versioned_ref.
-        butil::atomic_thread_fence(butil::memory_order_acquire);
         return _health_check_interval_s > 0 && _is_hc_related_ref_held;
     }
 
