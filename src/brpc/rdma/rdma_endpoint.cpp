@@ -985,11 +985,15 @@ ssize_t RdmaEndpoint::HandleCompletion(ibv_wc& wc) {
         }
         butil::subtle::MemoryBarrier();
 
-        _sq_window_size.fetch_add(wnd_to_update, butil::memory_order_relaxed);
-        if (_remote_rq_window_size.load(butil::memory_order_relaxed) >=
-            _local_window_capacity / 8) {
+        // Update sq window.
+        uint16_t old_sq_window_size =
+            _sq_window_size.fetch_add(wnd_to_update, butil::memory_order_relaxed);
+        bool is_remote_rq_ready =
+            _remote_rq_window_size.load(butil::memory_order_relaxed) >=
+                _local_window_capacity / 8;
+        if (0 == old_sq_window_size && is_remote_rq_ready) {
             // Do not wake up writing thread right after polling IBV_WC_SEND.
-            // Otherwise the writing thread may switch to background too quickly.
+            // Otherwise, the writing thread may switch to background too quickly.
             _socket->WakeAsEpollOut();
         }
         return 0;
@@ -1009,15 +1013,16 @@ ssize_t RdmaEndpoint::HandleCompletion(ibv_wc& wc) {
             }
         }
         if (0 != (wc.wc_flags & IBV_WC_WITH_IMM) && wc.imm_data > 0) {
-            // Update window
+            // Update remote sq window.
             uint32_t acks = butil::NetToHost32(wc.imm_data);
-            uint32_t wnd_thresh = _local_window_capacity / 8;
-            uint32_t remote_rq_window_size =
+            uint32_t remote_sq_window_thresh = _local_window_capacity / 8;
+            uint32_t old_remote_rq_window_size =
                 _remote_rq_window_size.fetch_add(acks, butil::memory_order_relaxed);
             if (_sq_window_size.load(butil::memory_order_relaxed) > 0 &&
-                (remote_rq_window_size >= wnd_thresh || acks >= wnd_thresh)) {
+                old_remote_rq_window_size < remote_sq_window_thresh &&
+                old_remote_rq_window_size + acks >= remote_sq_window_thresh) {
                 // Do not wake up writing thread right after _remote_rq_window_size > 0.
-                // Otherwise the writing thread may switch to background too quickly.
+                // Otherwise, the writing thread may switch to background too quickly.
                 _socket->WakeAsEpollOut();
             }
         }

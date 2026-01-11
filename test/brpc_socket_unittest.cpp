@@ -1495,8 +1495,44 @@ TEST_F(SocketTest, tcp_user_timeout) {
 }
 #endif
 
+TEST_F(SocketTest, connect_on_creation) {
+    brpc::Acceptor* messenger = new brpc::Acceptor;
+    int listening_fd = -1;
+    butil::EndPoint point(butil::IP_ANY, 7878);
+    for (int i = 0; i < 100; ++i) {
+        point.port += i;
+        listening_fd = tcp_listen(point);
+        if (listening_fd >= 0) {
+            break;
+        }
+    }
+    ASSERT_GT(listening_fd, 0) << berror();
+    ASSERT_EQ(0, butil::make_non_blocking(listening_fd));
+    ASSERT_EQ(0, messenger->StartAccept(listening_fd, -1, NULL, false));
+
+    {
+        brpc::SocketOptions options;
+        options.remote_side = point;
+        options.connect_on_create = true;
+        brpc::SocketId id = brpc::INVALID_SOCKET_ID;
+        ASSERT_EQ(0, brpc::get_or_new_client_side_messenger()->Create(options, &id));
+        brpc::SocketUniquePtr ptr;
+        ASSERT_EQ(0, brpc::Socket::Address(id, &ptr));
+        ASSERT_GT(ptr->fd(), 0);
+    }
+
+    {
+        point.port = 7879;
+        brpc::SocketOptions options;
+        options.remote_side = point;
+        options.connect_on_create = true;
+        brpc::SocketId id = brpc::INVALID_SOCKET_ID;
+        ASSERT_EQ(-1, brpc::get_or_new_client_side_messenger()->Create(options, &id));
+    }
+}
+
 int HandleSocketSuccessWrite(bthread_id_t id, void* data, int error_code,
-    const std::string& error_text) {
+                             const std::string& error_text) {
     auto success_count = static_cast<size_t*>(data);
     EXPECT_NE(nullptr, success_count);
     EXPECT_EQ(0, error_code);
