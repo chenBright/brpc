@@ -139,7 +139,7 @@ void SamplerCollector::run() {
     // NOTE:
     // * Following vars can't be created on thread's stack since this thread
     //   may be abandoned at any time after forking.
-    // * They can't created inside the constructor of SamplerCollector as well,
+    // * They can't be created inside the constructor of SamplerCollector as well,
     //   which results in deadlock.
     if (s_cumulated_time_bvar == NULL) {
         s_cumulated_time_bvar =

@@ -235,6 +235,8 @@ int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
     std::unique_lock<butil::Mutex> mu(_mutex);
     SingleConnection* sc = _map.seek(key);
     if (sc) {
+        // The `_mutex' guarantees the consistent state
+        // of `_is_hc_related_ref_held' in SocketMap.
         if (!sc->socket->Failed() || sc->socket->HCEnabled()) {
             ++sc->ref_count;
             *id = sc->socket->id();
@@ -255,7 +257,7 @@ int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
     opt.use_rdma = use_rdma;
     opt.hc_option = hc_option;
     if (_options.socket_creator->CreateSocket(opt, &tmp_id) != 0) {
-        PLOG(FATAL) << "Fail to create socket to " << key.peer;
+        PLOG(ERROR) << "Fail to create socket to " << key.peer;
         return -1;
     }
     // Add a reference to make sure that sc->socket is always accessible. Not
@@ -266,13 +268,18 @@ int SocketMap::Insert(const SocketMapKey& key, SocketId* id,
     if (rc < 0) {
         LOG(FATAL) << "Fail to address SocketId=" << tmp_id;
         return -1;
-    } else if (rc > 0 && !ptr->HCEnabled()) {
-        LOG(FATAL) << "Failed socket is not HC-enabled";
+    } else if (rc > 0 &&
+               // The `_mutex' guarantees the consistent state
+               // of `_is_hc_related_ref_held' in SocketMap.
+               !ptr->HCEnabled()) {
+        LOG(ERROR) << "Failed socket is not HC-enabled";
         return -1;
     }
     // If health check is enabled, a health-checking-related reference
     // is hold in Socket::Create.
     // If health check is disabled, hold a reference in SocketMap.
+    // The `_mutex' guarantees the consistent state
+    // of `_is_hc_related_ref_held' in SocketMap.
     SingleConnection new_sc = { 1, ptr->HCEnabled() ? ptr.get() : ptr.release(), 0 };
     _map[key] = new_sc;
     *id = tmp_id;
@@ -317,6 +324,10 @@ void SocketMap::RemoveInternal(const SocketMapKey& key,
 }
 
 void SocketMap::ReleaseReference(Socket* s) {
+    // The release fence in Dereference() of ReleaseHCRelatedReference()
+    // pairs with acquire fence in versioned_ref() of WaitAndReset() to
+    // avoid inconsistent states of `_is_hc_related_ref_held' to be seen
+    // by others.
     if (s->HCEnabled()) {
         s->ReleaseHCRelatedReference();
     } else {

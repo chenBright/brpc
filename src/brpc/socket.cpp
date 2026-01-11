@@ -99,6 +99,9 @@ DEFINE_int32(connect_timeout_as_unreachable, 3,
              "times *continuously*, the error is changed to ENETUNREACH which "
              "fails the main socket as well when this socket is pooled.");
 
+DEFINE_int32(wait_output_event_timeout_ms, 50,
+             "Timeout for waiting output event, default: 50ms.");
+
 DECLARE_bool(usercode_in_coroutine);
 
 static bool validate_connect_timeout_as_unreachable(const char*, int32_t v) {
@@ -106,8 +109,6 @@ static bool validate_connect_timeout_as_unreachable(const char*, int32_t v) {
 }
 BRPC_VALIDATE_GFLAG(connect_timeout_as_unreachable,
                          validate_connect_timeout_as_unreachable);
-
-const int WAIT_EPOLLOUT_TIMEOUT_MS = 50;
 
 class BAIDU_CACHELINE_ALIGNMENT SocketPool {
 friend class Socket;
@@ -718,7 +719,7 @@ int Socket::OnCreated(const SocketOptions& options) {
         return -1;
     }
     _io_event.set_bthread_tag(options.bthread_tag);
-    auto guard = butil::MakeScopeGuard([this] {
+    auto io_event_guard = butil::MakeScopeGuard([this] {
         _io_event.Reset();
     });
 
@@ -759,19 +760,12 @@ int Socket::OnCreated(const SocketOptions& options) {
 #if BRPC_WITH_RDMA
     CHECK(_rdma_ep == NULL);
     if (options.use_rdma) {
-        _rdma_ep = new (std::nothrow)rdma::RdmaEndpoint(this);
-        if (!_rdma_ep) {
-            const int saved_errno = errno;
-            PLOG(ERROR) << "Fail to create RdmaEndpoint";
-            SetFailed(saved_errno, "Fail to create RdmaEndpoint: %s",
-                         berror(saved_errno));
-            return -1;
-        }
+        _rdma_ep = new rdma::RdmaEndpoint(this);
         _rdma_state = RDMA_UNKNOWN;
     } else {
         _rdma_state = RDMA_OFF;
     }
-#endif
+#endif // BRPC_WITH_RDMA
     _connection_type_for_progressive_read = CONNECTION_TYPE_UNKNOWN;
     _controller_released_socket.store(false, butil::memory_order_relaxed);
     _overcrowded = false;
@@ -813,12 +807,12 @@ int Socket::OnCreated(const SocketOptions& options) {
     if (ResetFileDescriptor(fd) != 0) {
         const int saved_errno = errno;
         PLOG(ERROR) << "Fail to ResetFileDescriptor";
-        SetFailed(saved_errno, "Fail to ResetFileDescriptor: %s",
-                     berror(saved_errno));
+        SetFailed(saved_errno, "Fail to ResetFileDescriptor: %s", berror(saved_errno));
         return -1;
     }
+
     HoldHCRelatedRef();
-    guard.dismiss();
+    io_event_guard.dismiss();
 
     return 0;
 }
@@ -866,7 +860,7 @@ void Socket::BeforeRecycled() {
         _rdma_ep = NULL;
         _rdma_state = RDMA_UNKNOWN;
     }
-#endif
+#endif // BRPC_WITH_RDMA
 
     reset_parsing_context(NULL);
     _read_buf.clear();
@@ -953,7 +947,7 @@ std::string Socket::OnDescription() const {
         butil::string_appendf(&result, "fd=%d ", saved_fd);
     }
     butil::string_appendf(&result, "addr=%s",
-        butil::endpoint2str(remote_side()).c_str());
+                          butil::endpoint2str(remote_side()).c_str());
     const int local_port = local_side().port;
     if (local_port > 0) {
         butil::string_appendf(&result, ":%d", local_port);
@@ -997,7 +991,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
                      << " was abandoned during health checking";
             return -1;
         } else {
-            // nobody holds a health-checking-related reference,
+            // Nobody holds a health-checking-related reference,
             // so no need to do health checking.
             if (!_is_hc_related_ref_held) {
                 RPC_VLOG << "Nobody holds a health-checking-related reference"
@@ -1026,7 +1020,7 @@ int Socket::WaitAndReset(int32_t expected_nref) {
         _rdma_ep->Reset();
         _rdma_state = RDMA_UNKNOWN;
     }
-#endif
+#endif // BRPC_WITH_RDMA
 
     _local_side = butil::EndPoint();
     if (_ssl_session) {
@@ -1493,8 +1487,7 @@ void Socket::AfterAppConnected(int err, void* data) {
         bthread_t th;
         bthread_attr_t attr = BTHREAD_ATTR_NORMAL;
         bthread_attr_set_name(&attr, "KeepWrite");
-        if (bthread_start_background(
-                &th, &attr, KeepWrite, req) != 0) {
+        if (bthread_start_background(&th, &attr, KeepWrite, req) != 0) {
             PLOG(WARNING) << "Fail to start KeepWrite";
             KeepWrite(req);
         }
@@ -1825,6 +1818,13 @@ void* Socket::KeepWrite(void* void_arg) {
             break;
         }
 
+#if BRPC_WITH_RDMA
+        int expected_val = 0;
+        if (s->_rdma_state == RDMA_ON) {
+            expected_val = s->_epollout_butex->load(butil::memory_order_acquire);
+        }
+#endif // BRPC_WITH_RDMA
+
         const ssize_t nw = s->DoWrite(req);
         if (nw < 0) {
             if (errno != EAGAIN && errno != EOVERCROWDED) {
@@ -1862,27 +1862,24 @@ void* Socket::KeepWrite(void* void_arg) {
             // KeepWrite to check and setup pending WriteRequests periodically,
             // which may turn on _overcrowded to stop pending requests from
             // growing infinitely.
-            const timespec duetime =
-                butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
+            const timespec duetime = butil::milliseconds_from_now(
+                std::max(1, FLAGS_wait_output_event_timeout_ms));
 #if BRPC_WITH_RDMA
             if (s->_rdma_state == RDMA_ON) {
-                const int expected_val = s->_epollout_butex
-                    ->load(butil::memory_order_acquire);
                 CHECK(s->_rdma_ep != NULL);
                 if (!s->_rdma_ep->IsWritable()) {
                     g_vars->nwaitepollout << 1;
-                    if (bthread::butex_wait(s->_epollout_butex,
-                            expected_val, &duetime) < 0) {
-                        if (errno != EAGAIN && errno != ETIMEDOUT) {
+                    if (bthread::butex_wait(s->_epollout_butex, expected_val, &duetime) < 0) {
+                        if (errno != EAGAIN && errno != ETIMEDOUT && errno != EWOULDBLOCK) {
                             const int saved_errno = errno;
                             PLOG(WARNING) << "Fail to wait rdma window of " << *s;
                             s->SetFailed(saved_errno, "Fail to wait rdma window of %s: %s",
-                                    s->description().c_str(), berror(saved_errno));
+                                         s->description().c_str(), berror(saved_errno));
                         }
                         if (s->Failed()) {
                             // NOTE:
                             // Different from TCP, we cannot find the RDMA channel
-                            // failed by writing to it. Thus we must check if it
+                            // failed by writing to it. Thus, we must check if it
                             // is already failed here.
                             break;
                         }
@@ -1891,7 +1888,7 @@ void* Socket::KeepWrite(void* void_arg) {
             } else {
 #else
             {
-#endif
+#endif // BRPC_WITH_RDMA
                 g_vars->nwaitepollout << 1;
                 bool pollin = (s->_on_edge_triggered_events != NULL);
                 const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
@@ -2281,7 +2278,7 @@ int Socket::OnInputEvent(void* user_data, uint32_t events,
                 LOG(FATAL) << "Fail to start ProcessEvent";
                 ProcessEvent(p);
             }
-#endif
+#endif // BRPC_WITH_RDMA
         } else if (bthread_start_urgent(&tid, &attr, ProcessEvent, p) != 0) {
             LOG(FATAL) << "Fail to start ProcessEvent";
             ProcessEvent(p);
@@ -2591,7 +2588,7 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
     if (ptr->_rdma_state == RDMA_ON && ptr->_rdma_ep) {
         ptr->_rdma_ep->DebugInfo(os);
     }
-#endif
+#endif // BRPC_WITH_RDMA
     { os << "\nbthread_tag=" << ptr->_io_event.bthread_tag(); }
 }
 
