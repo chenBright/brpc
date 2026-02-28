@@ -225,15 +225,17 @@ typedef struct bthread_sem_t {
 typedef struct bthread_rwlock_t {
 #if defined(__cplusplus)
     bthread_rwlock_t()
-        : reader_count(0), reader_wait(0), wlock_flag(false), writer_csite{} {}
+        : w_wait_count(0), state(NULL),  writer_csite{} {}
     DISALLOW_COPY_AND_ASSIGN(bthread_rwlock_t);
 #endif
-    bthread_sem_t reader_sema; // Semaphore for readers to wait for completing writers.
-    bthread_sem_t writer_sema; // Semaphore for writers to wait for completing readers.
-    int reader_count; // Number of pending readers.
-    int reader_wait; // Number of departing readers.
-    bool wlock_flag; // Flag used to indicate that a write lock has been held.
-    bthread_mutex_t write_queue_mutex; // Held if there are pending writers.
+    // Count of the bthread who holding write lock yet.
+    unsigned* w_wait_count;
+    // Held if there are pending writers.
+    bthread_mutex_t write_queue_mutex;
+    // Highest bit 1 for write locked,
+    // low 31 bit for read lock holding count,
+    // 0 for unlocked.
+    unsigned* state;
     bthread_contention_site_t writer_csite;
 } bthread_rwlock_t;
 
