@@ -1,0 +1,14 @@
+inputs:
+  protobuf-version:
+    description: version of protobuf
+    required: true
+  env:
+    description: action environment
+    required: false
+runs:
+  using: "composite"
+  steps:
+  - run: | 
+      bash ./.github/actions/compile-with-bazel-protobuf/change_bzlmod_protobuf_version.sh ${{inputs.protobuf-version}}
+      bazel build --verbose_failures --action_env="${{inputs.env}}" -- //... -//example/...
+    shell: bash
