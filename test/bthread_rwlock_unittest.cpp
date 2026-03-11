@@ -284,6 +284,7 @@ TEST(RWLockTest, mix_thread_types) {
     }
 
     ASSERT_EQ(0, bthread_rwlock_destroy(&rw));
+    LOG(INFO) << 11111111;
 }
 
 struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
@@ -386,13 +387,14 @@ void PerfTest(uint32_t writer_ratio, ThreadId* /*dummy*/, int thread_num,
               << " writer_ratio=" << writer_ratio
               << " reader_num=" << reader_num
               << " read_count=" << read_count
-              << " read_average_time=" << (read_count == 0 ? 0 : read_wait_time / (double)read_count)
+              << " read_average_time=" << (read_count == 0 ? 0 : read_wait_time / (double)read_count) << "ns"
               << " writer_num=" << writer_num
               << " write_count=" << write_count
-              << " write_average_time=" << (write_count == 0 ? 0 : write_wait_time / (double)write_count);
+              << " write_average_time=" << (write_count == 0 ? 0 : write_wait_time / (double)write_count) << "ns";
 }
 
 TEST(RWLockTest, performance) {
+    bthread_setconcurrency(16);
     const int thread_num = 12;
     PerfTest(0, (pthread_t*)NULL, thread_num, pthread_create, pthread_join);
     PerfTest(0, (bthread_t*)NULL, thread_num, bthread_start_background, bthread_join);
