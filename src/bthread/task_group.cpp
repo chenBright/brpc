@@ -247,6 +247,12 @@ TaskGroup::~TaskGroup() {
 }
 
 #ifdef BUTIL_USE_ASAN
+// Returns the **highest** address of the calling pthread's stack and its
+// total size, matching brpc's `StackStorage::bottom` convention (see comment
+// in bthread/stack.h: "Assume stack grows upwards"). Note that on Linux
+// `pthread_attr_getstack(3)` returns the lowest address of the region, so
+// we have to translate it; on macOS `pthread_get_stackaddr_np(3)` already
+// returns the stack base (highest address), so we use it as-is.
 int PthreadAttrGetStack(void*& stack_addr, size_t& stack_size) {
 #if defined(OS_MACOSX)
     stack_addr = pthread_get_stackaddr_np(pthread_self());
@@ -259,9 +265,13 @@ int PthreadAttrGetStack(void*& stack_addr, size_t& stack_size) {
         LOG(ERROR) << "Fail to get pthread attributes: " << berror(rc);
         return rc;
     }
-    rc = pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+    void* stack_lowest = NULL;
+    rc = pthread_attr_getstack(&attr, &stack_lowest, &stack_size);
     if (0 != rc) {
         LOG(ERROR) << "Fail to get pthread stack: " << berror(rc);
+    } else {
+        // Translate lowest -> highest to match StackStorage::bottom.
+        stack_addr = (char*)stack_lowest + stack_size;
     }
     pthread_attr_destroy(&attr);
     return rc;
@@ -312,6 +322,12 @@ int TaskGroup::init(size_t runqueue_capacity) {
     m->set_stack(stk);
 
 #ifdef BUTIL_USE_ASAN
+    // PthreadAttrGetStack returns the highest address of the pthread stack,
+    // which matches StackStorage::bottom semantics (see bthread/stack.h).
+    // Without this translation, the BTHREAD_SCOPED_ASAN_FIBER_SWITCHER on
+    // every jump_stack would register a bogus stack range to ASan and trip
+    // "ignoring requested __asan_handle_no_return" on subsequent
+    // pthread_exit / exception-unwinding paths.
     stk->storage.bottom = stack_addr;
     stk->storage.stacksize = stack_size;
     // No guard size required for ASan.
