@@ -475,7 +475,6 @@ cc_library(
     deps = [
         ":brpc_idl_options_cc_proto",
         ":butil",
-        "@com_google_protobuf//:protoc_lib",
     ],
 )
 
@@ -587,5 +586,6 @@ cc_binary(
     deps = [
         ":brpc",
         ":brpc_idl_options_cc_proto",
+        "@com_google_protobuf//:protoc_lib",
     ],
 )
