@@ -29,6 +29,7 @@
 #include "butil/iobuf.h"
 #include "butil/macros.h"
 #include "butil/containers/mpsc_queue.h"
+#include "butil/containers/optional.h"
 #include "brpc/socket.h"
 
 
@@ -99,8 +100,8 @@ friend class RdmaHandshakeServerV3;
 friend int v2_wire::ReadBodyAndNegotiate(RdmaEndpoint*, ParsedHello*, bool*);
 friend int v2_wire::DrainBytes(RdmaEndpoint*, size_t);
 friend void v3_wire::FillLocalRdmaHello(const RdmaEndpoint*, RdmaHello*);
-friend int  v3_wire::ReadAndParseV3Hello(RdmaEndpoint*, RdmaHello*);
-friend int  v3_wire::WriteV3Hello(RdmaEndpoint*, const RdmaHello&);
+friend int v3_wire::ReadAndParseV3Hello(RdmaEndpoint*, RdmaHello*);
+friend int v3_wire::WriteV3Hello(RdmaEndpoint*, const RdmaHello&);
 public:
     explicit RdmaEndpoint(Socket* s);
     ~RdmaEndpoint() override;
@@ -227,15 +228,19 @@ private:
     // peer's hello has been validated.
     void ApplyRemoteHello(const ParsedHello& remote);
 
-    // Bringup the QP from RESET state to RTS state
+    // Bringup the QP from RESET state to RTS state.
     // Arguments:
-    //     lid: remote LID
-    //     gid: remote GID
-    //     qp_num: remote QP number
+    //     remote:    parsed remote hello. Provides the remote LID/GID/QP
+    //                number for the RTR transition, and (on v3) the peer's
+    //                ECE to set during the INIT->RTR transition.
+    //     is_server: true on the server (responder) side, false on the
+    //                client (requestor) side. Drives the role-specific
+    //                step of the ECE negotiation (only the server queries
+    //                the reduced ECE after RTS).
     // Return:
     //     0:   success
     //     -1:  failed, errno set
-    int BringUpQp(uint16_t lid, ibv_gid gid, uint32_t qp_num);
+    int BringUpQp(const ParsedHello& remote, bool is_server);
 
     // Get event from comp channel and ack the events
     int GetAndAckEvents(SocketUniquePtr& s);
@@ -270,6 +275,16 @@ private:
     //   2 = v2 "RDMA"
     //   3 = v3 "RDM3"
     int _handshake_version;
+
+    // ---- ECE (Enhanced Connection Establishment) negotiation state ----
+    // ECE payload to advertise in the next local hello:
+    //   - on the client: the locally queried ECE capabilities (filled
+    //     before C_HELLO_SEND);
+    //   - on the server: the reduced/negotiated ECE queried after the
+    //     QP reached RTS (filled in BringUpQp).
+    // The two roles are mutually exclusive over an endpoint's lifetime,
+    // so a single field is enough. nullopt -> no ECE advertised.
+    butil::optional<ibv_ece> _outgoing_ece;
 
     // rdma resource
     RdmaResource* _resource;
