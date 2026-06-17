@@ -176,7 +176,9 @@ void RdmaTransport::QueueMessage(InputMessageClosure& input_msg,
 
 void RdmaTransport::Debug(std::ostream &os) {
     if (_rdma_state == RDMA_ON && _rdma_ep) {
+        os << "\nrdma={\n";
         _rdma_ep->DebugInfo(os);
+        os << "\n}";
     }
 }
 

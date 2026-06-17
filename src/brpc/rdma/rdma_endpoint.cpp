@@ -118,6 +118,7 @@ RdmaEndpoint::RdmaEndpoint(Socket* s)
     , _state(UNINIT)
     , _handshake_version(0)
     , _resource(NULL)
+    , _device(NULL)
     , _send_cq_events(0)
     , _recv_cq_events(0)
     , _cq_sid(INVALID_SOCKET_ID)
@@ -163,6 +164,7 @@ void RdmaEndpoint::Reset() {
 
     _state = UNINIT;
     _resource = NULL;
+    _device = NULL;
     _send_cq_events = 0;
     _recv_cq_events = 0;
     _cq_sid = INVALID_SOCKET_ID;
@@ -430,7 +432,7 @@ inline void RdmaEndpoint::TryReadOnTcp() {
     }
 }
 
-void RdmaEndpoint::ApplyRemoteHello(const ParsedHello& remote) {
+void RdmaEndpoint::ApplyRemoteHello(const ParsedHello& remote, SocketUniquePtr& s) {
     _remote_recv_block_size = remote.block_size;
     _local_window_capacity =
         std::min(_sq_size, remote.rq_size) - RESERVED_WR_NUM;
@@ -441,6 +443,29 @@ void RdmaEndpoint::ApplyRemoteHello(const ParsedHello& remote) {
         _local_window_capacity, butil::memory_order_relaxed);
     _sq_window_size.store(
         _local_window_capacity, butil::memory_order_relaxed);
+
+    // The client already has the device, so return directly.
+    if (_device != NULL) {
+        return;
+    }
+
+    // todo 支持配置选网卡策略
+    if (!remote.device_name.empty()) {
+        RdmaDevice const* preferred_dev = GetRdmaDevice(remote.device_name);
+        if (preferred_dev != NULL) {
+            _device = preferred_dev;
+        } else {
+            _device = GetDefaultRdmaDevice();
+            LOG_IF(INFO, FLAGS_rdma_trace_verbose)
+                << "Client device '" << remote.device_name
+                << "' not found on server (have " << GetRdmaDeviceCount()
+                << " devices), using default '"
+                << (_device ? _device->name : "none") << "'"
+                << " on " << s->description();
+        }
+    } else {
+        _device = GetDefaultRdmaDevice();
+    }
 }
 
 // Client-side handshake entry: the state machine.
@@ -469,6 +494,10 @@ void* RdmaEndpoint::ProcessHandshakeAtClient(void* arg) {
 
     LOG_IF(INFO, FLAGS_rdma_trace_verbose)
         << "Start handshake on " << s->description();
+
+    // Resolve device for this endpoint if not already done.
+    // todo 选择网卡的策略
+    ep->_device = GetDefaultRdmaDevice();
 
     std::unique_ptr<RdmaHandshake> handshake = CreateClientHandshake(ep);
     CHECK(handshake != NULL);
@@ -514,7 +543,7 @@ void* RdmaEndpoint::ProcessHandshakeAtClient(void* arg) {
                      << s->description();
         rdma_transport->_rdma_state = RdmaTransport::RDMA_OFF;
     } else {
-        ep->ApplyRemoteHello(remote);
+        ep->ApplyRemoteHello(remote, s);
         ep->_state = C_BRINGUP_QP;
         if (ep->BringUpQp(remote.lid, remote.gid, remote.qp_num) < 0) {
             LOG(WARNING) << "Fail to bringup QP, fallback to tcp:"
@@ -543,7 +572,11 @@ void* RdmaEndpoint::ProcessHandshakeAtClient(void* arg) {
         ep->_state = ESTABLISHED;
         LOG_IF(INFO, FLAGS_rdma_trace_verbose)
             << "Client handshake ends (use rdma v" << ep->_handshake_version
-            << ") on " << s->description();
+            << ") on " << s->description()
+            << ", local_device=" << ep->_device->name
+            << " (pd_index=" << ep->_device->pd_index
+            << ", remote_device=" << remote.device_name;
+
     } else {
         ep->_state = FALLBACK_TCP;
         LOG_IF(INFO, FLAGS_rdma_trace_verbose)
@@ -623,7 +656,7 @@ void* RdmaEndpoint::ProcessHandshakeAtServer(void* arg) {
                      << s->description();
         rdma_transport->_rdma_state = RdmaTransport::RDMA_OFF;
     } else {
-        ep->ApplyRemoteHello(remote);
+        ep->ApplyRemoteHello(remote, s);
         ep->_state = S_ALLOC_QPCQ;
         if (ep->AllocateResources() < 0) {
             LOG(WARNING) << "Fail to allocate rdma resources, fallback to tcp:"
@@ -680,12 +713,16 @@ void* RdmaEndpoint::ProcessHandshakeAtServer(void* arg) {
         ep->_state = ESTABLISHED;
         LOG_IF(INFO, FLAGS_rdma_trace_verbose)
             << "Server handshake ends (use rdma v" << ep->_handshake_version
-            << ") on " << s->description();
+            << ") on " << s->description()
+            << ", local_device=" << ep->_device->name
+            << " (pd_index=" << ep->_device->pd_index
+            << ", client_device=" << remote.device_name;
     } else {
         rdma_transport->_rdma_state = RdmaTransport::RDMA_OFF;
         ep->_state = FALLBACK_TCP;
         LOG_IF(INFO, FLAGS_rdma_trace_verbose)
             << "Server handshake ends (use tcp) on " << s->description();
+
     }
 
     ep->TryReadOnTcp();
@@ -711,8 +748,8 @@ private:
     // Cut the current IOBuf to ibv_sge list and `to' for at most first max_sge
     // blocks or first max_len bytes.
     // Return: the bytes included in the sglist, or -1 if failed
-    ssize_t cut_into_sglist_and_iobuf(ibv_sge* sglist, size_t* sge_index,
-            butil::IOBuf* to, size_t max_sge, size_t max_len) {
+    ssize_t cut_into_sglist_and_iobuf(ibv_sge* sglist, size_t* sge_index, butil::IOBuf* to,
+                                      size_t max_sge, size_t max_len, uint8_t pd_index) {
         size_t len = 0;
         while (*sge_index < max_sge) {
             if (len == max_len || _ref_num() == 0) {
@@ -729,7 +766,7 @@ private:
                 }
             }
             if (BAIDU_UNLIKELY(lkey == 0)) {  // only happens when meta is not specified
-                lkey = GetLKey((char*)start - r.offset);
+                lkey = GetLKey((char*)start - r.offset, pd_index);
             }
             if (lkey == 0) {
                 LOG(WARNING) << "Memory not registered for rdma. "
@@ -774,8 +811,9 @@ ssize_t RdmaEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
         _remote_rq_window_size.load(butil::memory_order_relaxed);
     uint32_t sq_window_size =
         _sq_window_size.load(butil::memory_order_relaxed);
-    ibv_send_wr wr;
-    int max_sge = GetRdmaMaxSge();
+    ibv_send_wr wr{};
+    uint8_t pd_index = _device->pd_index;
+    int max_sge = _device->max_sge;
     ibv_sge sglist[max_sge];
     while (current < ndata) {
         if (remote_rq_window_size == 0 || sq_window_size == 0) {
@@ -809,7 +847,8 @@ ssize_t RdmaEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
             }
 
             ssize_t len = data->cut_into_sglist_and_iobuf(
-                sglist, &sge_index, to, max_sge, _remote_recv_block_size - this_len);
+                sglist, &sge_index, to, max_sge,
+                _remote_recv_block_size - this_len, pd_index);
             if (len < 0) {
                 return -1;
             }
@@ -1008,12 +1047,12 @@ ssize_t RdmaEndpoint::HandleCompletion(ibv_wc& wc) {
 }
 
 int RdmaEndpoint::DoPostRecv(void* block, size_t block_size) {
-    ibv_recv_wr wr;
+    ibv_recv_wr wr{};
     memset(&wr, 0, sizeof(wr));
     ibv_sge sge;
     sge.addr = (uint64_t)block;
     sge.length = block_size;
-    sge.lkey = GetRegionId(block);
+    sge.lkey = GetRegionId(block, _device->pd_index);
     wr.num_sge = 1;
     wr.sg_list = &sge;
 
@@ -1055,23 +1094,24 @@ int RdmaEndpoint::PostRecv(uint32_t num, bool zerocopy) {
     return 0;
 }
 
-static ibv_qp* AllocateQp(ibv_cq* send_cq, ibv_cq* recv_cq, uint32_t sq_size, uint32_t rq_size) {
+static ibv_qp* AllocateQp(ibv_cq* send_cq, ibv_cq* recv_cq, uint32_t sq_size,
+                          uint32_t rq_size, RdmaDevice const* device) {
     ibv_qp_init_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.send_cq = send_cq;
     attr.recv_cq = recv_cq;
     attr.cap.max_send_wr = sq_size;
     attr.cap.max_recv_wr = rq_size;
-    attr.cap.max_send_sge = GetRdmaMaxSge();
+    attr.cap.max_send_sge = device->max_sge;
     attr.cap.max_recv_sge = 1;
     attr.qp_type = IBV_QPT_RC;
-    return IbvCreateQp(GetRdmaPd(), &attr);
+    return IbvCreateQp(device->pd, &attr);
 }
 
-static RdmaResource* AllocateQpCq(uint16_t sq_size, uint16_t rq_size) {
+static RdmaResource* AllocateQpCq(uint16_t sq_size, uint16_t rq_size, RdmaDevice const* device) {
     std::unique_ptr<RdmaResource> resource(new RdmaResource);
     if (!FLAGS_rdma_use_polling) {
-        resource->comp_channel = IbvCreateCompChannel(GetRdmaContext());
+        resource->comp_channel = IbvCreateCompChannel(device->context);
         if (NULL == resource->comp_channel) {
             PLOG(WARNING) << "Fail to create comp channel for CQ";
             return NULL;
@@ -1086,35 +1126,36 @@ static RdmaResource* AllocateQpCq(uint16_t sq_size, uint16_t rq_size) {
             return NULL;
         }
 
-        resource->send_cq = IbvCreateCq(GetRdmaContext(), FLAGS_rdma_prepared_qp_size,
-                                        NULL, resource->comp_channel, GetRdmaCompVector());
+        int comp_vector = device->GetCompVector();
+        resource->send_cq = IbvCreateCq(device->context, FLAGS_rdma_prepared_qp_size,
+                                        NULL, resource->comp_channel, comp_vector);
         if (NULL == resource->send_cq) {
             PLOG(WARNING) << "Fail to create send CQ";
             return NULL;
         }
 
-        resource->recv_cq = IbvCreateCq(GetRdmaContext(), FLAGS_rdma_prepared_qp_size,
-                                        NULL, resource->comp_channel, GetRdmaCompVector());
+        resource->recv_cq = IbvCreateCq(device->context, FLAGS_rdma_prepared_qp_size,
+                                        NULL, resource->comp_channel, comp_vector);
         if (NULL == resource->recv_cq) {
             PLOG(WARNING) << "Fail to create recv CQ";
             return NULL;
         }
 
-        resource->qp = AllocateQp(resource->send_cq, resource->recv_cq, sq_size, rq_size);
+        resource->qp = AllocateQp(resource->send_cq, resource->recv_cq, sq_size, rq_size, device);
         if (NULL == resource->qp) {
             PLOG(WARNING) << "Fail to create QP";
             return NULL;
         }
     } else {
         resource->polling_cq =
-            IbvCreateCq(GetRdmaContext(), 2 * FLAGS_rdma_prepared_qp_size, NULL, NULL, 0);
+            IbvCreateCq(device->context, 2 * FLAGS_rdma_prepared_qp_size, NULL, NULL, 0);
         if (NULL == resource->polling_cq) {
             PLOG(WARNING) << "Fail to create polling CQ";
             return NULL;
         }
         resource->qp = AllocateQp(resource->polling_cq,
                                   resource->polling_cq,
-                                  sq_size, rq_size);
+                                  sq_size, rq_size, device);
         if (NULL == resource->qp) {
             PLOG(WARNING) << "Fail to create QP";
             return NULL;
@@ -1131,8 +1172,13 @@ int RdmaEndpoint::AllocateResources() {
     }
 
     CHECK(_resource == NULL);
+    CHECK(_device != NULL);
 
-    if (_sq_size <= FLAGS_rdma_prepared_qp_size &&
+    // todo 支持非默认设备都预分配吗？
+    // The pre-allocated QP pool is created on the default device.
+    // Only reuse pooled resources when this endpoint uses the default device.
+    if (_device == GetDefaultRdmaDevice() &&
+        _sq_size <= FLAGS_rdma_prepared_qp_size &&
         _rq_size <= FLAGS_rdma_prepared_qp_size) {
         BAIDU_SCOPED_LOCK(*g_rdma_resource_mutex);
         if (g_rdma_resource_list) {
@@ -1141,7 +1187,7 @@ int RdmaEndpoint::AllocateResources() {
         }
     }
     if (!_resource) {
-        _resource = AllocateQpCq(_sq_size, _rq_size);
+        _resource = AllocateQpCq(_sq_size, _rq_size, _device);
     } else {
         _resource->next = NULL;
     }
@@ -1203,7 +1249,7 @@ int RdmaEndpoint::BringUpQp(uint16_t lid, ibv_gid gid, uint32_t qp_num) {
 
     attr.qp_state = IBV_QPS_INIT;
     attr.pkey_index = 0;  // TODO: support more pkey use in future
-    attr.port_num = GetRdmaPortNum();
+    attr.port_num = _device->port_num;
     attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE;
     int err = IbvModifyQp(_resource->qp, &attr, (ibv_qp_attr_mask)(
                 IBV_QP_STATE |
@@ -1239,7 +1285,7 @@ int RdmaEndpoint::BringUpQp(uint16_t lid, ibv_gid gid, uint32_t qp_num) {
     attr.path_mtu = IBV_MTU_1024;  // TODO: support more mtu in future
     attr.ah_attr.grh.dgid = gid;
     attr.ah_attr.grh.flow_label = 0;
-    attr.ah_attr.grh.sgid_index = GetRdmaGidIndex();
+    attr.ah_attr.grh.sgid_index = _device->gid_index;
     attr.ah_attr.grh.hop_limit = MAX_HOP_LIMIT;
     attr.ah_attr.grh.traffic_class = 0;
     attr.ah_attr.dlid = lid;
@@ -1247,7 +1293,7 @@ int RdmaEndpoint::BringUpQp(uint16_t lid, ibv_gid gid, uint32_t qp_num) {
     attr.ah_attr.src_path_bits = 0;
     attr.ah_attr.static_rate = 0;
     attr.ah_attr.is_global = 1;
-    attr.ah_attr.port_num = GetRdmaPortNum();
+    attr.ah_attr.port_num = _device->port_num;
     attr.dest_qp_num = qp_num;
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 0;
@@ -1317,8 +1363,12 @@ void RdmaEndpoint::DeallocateResources() {
     if (FLAGS_rdma_use_polling) {
         PollerRemoveCqSid();
     }
+
     bool move_to_rdma_resource_list = false;
-    if (_sq_size <= FLAGS_rdma_prepared_qp_size &&
+    // todo 支持非默认设备吗？
+    // Only recycle QP resources to the pool if they belong to the default device.
+    if (_device == GetDefaultRdmaDevice() &&
+        _sq_size <= FLAGS_rdma_prepared_qp_size &&
         _rq_size <= FLAGS_rdma_prepared_qp_size &&
         FLAGS_rdma_prepared_qp_cnt > 0) {
         ibv_qp_attr attr;
@@ -1635,7 +1685,9 @@ int RdmaEndpoint::GlobalInitialize() {
     g_rdma_resource_mutex = new butil::Mutex;
     for (int i = 0; i < FLAGS_rdma_prepared_qp_cnt; ++i) {
         RdmaResource* res = AllocateQpCq(FLAGS_rdma_prepared_qp_size,
-                                         FLAGS_rdma_prepared_qp_size);
+                                         FLAGS_rdma_prepared_qp_size,
+                                         // todo 支持非默认设备预分配吗？
+                                         GetDefaultRdmaDevice());
         if (!res) {
             return -1;
         }

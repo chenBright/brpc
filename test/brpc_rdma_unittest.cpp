@@ -513,7 +513,7 @@ TEST_F(RdmaTest, client_close_after_qp_build) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
 
@@ -550,7 +550,7 @@ TEST_F(RdmaTest, client_close_during_ack_send) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
 
@@ -594,7 +594,7 @@ TEST_F(RdmaTest, client_close_after_ack_send) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
 
@@ -659,7 +659,7 @@ TEST_F(RdmaTest, client_send_data_on_tcp_after_ack_send) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
 
@@ -1075,7 +1075,7 @@ TEST_F(RdmaTest, server_hello_invalid_sq_rq_size) {
     msg.rq_size = 0;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
     ASSERT_EQ(rdma::v2_wire::HELLO_MSG_LEN_MIN, write(acc_fd, data, rdma::v2_wire::HELLO_MSG_LEN_MIN));
@@ -1127,7 +1127,7 @@ TEST_F(RdmaTest, server_miss_after_ack) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
     ASSERT_EQ(rdma::v2_wire::HELLO_MSG_LEN_MIN, write(acc_fd, data, rdma::v2_wire::HELLO_MSG_LEN_MIN));
@@ -1179,7 +1179,7 @@ TEST_F(RdmaTest, server_close_after_ack) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
     ASSERT_EQ(rdma::v2_wire::HELLO_MSG_LEN_MIN, write(acc_fd, data, rdma::v2_wire::HELLO_MSG_LEN_MIN));
@@ -1232,7 +1232,7 @@ TEST_F(RdmaTest, server_send_data_on_tcp_after_ack) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
     memcpy(data, "RDMA", 4);
     msg.Serialize(data + 4);
     ASSERT_EQ(rdma::v2_wire::HELLO_MSG_LEN_MIN, write(acc_fd, data, rdma::v2_wire::HELLO_MSG_LEN_MIN));
@@ -1320,7 +1320,7 @@ TEST_F(RdmaTest, v2_server_hello_bytes_baseline) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
 
     uint8_t data[rdma::v2_wire::HELLO_MSG_LEN_MIN];
     memcpy(data, "RDMA", 4);
@@ -1385,7 +1385,7 @@ TEST_F(RdmaTest, v2_server_drains_tail_then_reads_ack) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
 
     uint8_t buf[48];
     memcpy(buf, "RDMA", 4);
@@ -1434,7 +1434,7 @@ TEST_F(RdmaTest, v2_server_rejects_oversized_msg_len) {
     msg.rq_size = 16;
     msg.block_size = 8192;
     msg.qp_num = 0;
-    msg.gid = rdma::GetRdmaGid();
+    msg.gid = rdma::GetDefaultRdmaDevice()->gid;
 
     uint8_t buf[rdma::v2_wire::HELLO_MSG_LEN_MIN];
     memcpy(buf, "RDMA", 4);
@@ -1493,7 +1493,7 @@ rdma::RdmaHello MakeValidV3Hello() {
     msg.set_sq_size(16);
     msg.set_rq_size(16);
     msg.set_lid(0);
-    ibv_gid gid = rdma::GetRdmaGid();
+    ibv_gid gid = rdma::GetDefaultRdmaDevice()->gid;
     msg.set_gid(std::string(reinterpret_cast<const char*>(gid.raw),
                             sizeof(gid.raw)));
     msg.set_qp_num(0);

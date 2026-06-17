@@ -46,6 +46,7 @@ struct ParsedHello {
     uint16_t lid;
     ibv_gid  gid;
     uint32_t qp_num;
+    std::string device_name;
 };
 
 namespace v2_wire {

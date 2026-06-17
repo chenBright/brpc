@@ -66,7 +66,7 @@ struct Region {
     uintptr_t start;
     size_t size;
     uint32_t block_type;
-    uint32_t id;  // lkey
+    uint32_t ids[RDMA_MAX_DEVICES]{};  // lkey per PD (indexed by pd_index)
 };
 
 static const int32_t RDMA_MEMORY_POOL_MIN_REGIONS = 1;
@@ -104,7 +104,7 @@ struct GlobalInfo {
 };
 static GlobalInfo* g_info = NULL;
 
-static inline Region* GetRegion(const void* buf) {
+static Region* GetRegion(const void* buf) {
     if (!buf) {
         errno = EINVAL;
         return NULL;
@@ -125,12 +125,20 @@ static inline Region* GetRegion(const void* buf) {
 }
 
 uint32_t GetRegionId(const void* buf) {
+    return GetRegionId(buf, 0);
+}
+
+uint32_t GetRegionId(const void* buf, int pd_index) {
     Region* r = GetRegion(buf);
     if (!r) {
         return 0;
     }
-    return r->id;
+    if (pd_index < 0 || pd_index >= RDMA_MAX_DEVICES) {
+        return 0;
+    }
+    return r->ids[pd_index];
 }
+
 
 static void* ExtendBlockPoolImpl(void* region_base, size_t region_size, int block_type) {
     auto region_base_guard = butil::MakeScopeGuard([region_base]() {
@@ -143,8 +151,8 @@ static void* ExtendBlockPoolImpl(void* region_base, size_t region_size, int bloc
         return NULL;
     }
 
-    uint32_t id = g_cb(region_base, region_size);
-    if (id == 0) {
+    RegisterIds register_ids = g_cb(region_base, region_size);
+    if (register_ids.empty() || register_ids[0] == 0) {
         errno = EINVAL;
         return NULL;
     }
@@ -165,8 +173,13 @@ static void* ExtendBlockPoolImpl(void* region_base, size_t region_size, int bloc
     Region* region = &g_regions[g_region_num++];
     region->start = (uintptr_t)region_base;
     region->size = region_size;
-    region->id = id;
     region->block_type = block_type;
+    // Copy lkeys for all devices from the callback result
+    CHECK_LT(register_ids.size(), RDMA_MAX_DEVICES);
+    for (size_t d = 0; d < register_ids.size() && d < RDMA_MAX_DEVICES; ++d) {
+        region->ids[d] = register_ids[d];
+    }
+
 
     for (size_t i = 0; i < g_buckets; ++i) {
         node[i]->start = (void*)(region->start + i * (region_size / g_buckets));
@@ -579,13 +592,16 @@ void DumpMemoryPoolInfo(std::ostream& os) {
     usleep(1000); // wait until all the threads read new g_dump_enable
     BAIDU_SCOPED_LOCK(*g_dump_mutex);
     os << "********************* Memory Pool Info Dump **********************\n";
-    os << "Region Info:\n";
+    int dev_count = GetRdmaDeviceCount();
+    os << "Region Info (devices=" << dev_count << "):\n";
     for (int i = 0; i < g_region_num; ++i) {
         os << "\tRegion " << i << ":\n"
            << "\t\tBase Addr: " << g_regions[i].start << "\n"
            << "\t\tSize: " << g_regions[i].size << "\n"
-           << "\t\tBlock Type: " << g_regions[i].block_type << "\n"
-           << "\t\tId: " << g_regions[i].id << "\n";
+           << "\t\tBlock Type: " << g_regions[i].block_type << "\n";
+        for (int d = 0; d < dev_count; ++d) {
+            os << "\t\tlkey[" << d << "]: " << g_regions[i].ids[d] << "\n";
+        }
     }
     os << "Idle List Info:\n";
     for (int i = 0; i < BLOCK_SIZE_COUNT; ++i) {

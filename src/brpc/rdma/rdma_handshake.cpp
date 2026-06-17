@@ -27,9 +27,9 @@
 #include "butil/iobuf.h"        // IOBuf, IOPortal, IOBufAsZeroCopy*Stream
 #include "butil/sys_byteorder.h"
 #include "brpc/socket.h"
+#include "brpc/rdma_transport.h"
 #include "brpc/rdma/rdma_endpoint.h"
 #include "brpc/rdma/rdma_helper.h"
-#include "brpc/rdma_transport.h"
 #include "brpc/rdma/rdma_handshake.pb.h"
 
 namespace brpc {
@@ -162,8 +162,8 @@ int RdmaHandshakeClientV2::SendLocalHello() {
     local_msg.block_size = g_rdma_recv_block_size;
     local_msg.sq_size = ep->_sq_size;
     local_msg.rq_size = ep->_rq_size;
-    local_msg.lid = GetRdmaLid();
-    local_msg.gid = GetRdmaGid();
+    local_msg.lid = _ep->_device->lid;
+    local_msg.gid = _ep->_device->gid;
     if (BAIDU_LIKELY(ep->_resource)) {
         local_msg.qp_num = ep->_resource->qp->qp_num;
     } else {
@@ -209,15 +209,15 @@ int RdmaHandshakeServerV2::SendLocalHello() {
         local_msg.rq_size = 0;
         local_msg.lid = 0;
         memset(local_msg.gid.raw, 0, sizeof(local_msg.gid.raw));
-        local_msg.qp_num     = 0;
+        local_msg.qp_num = 0;
     } else {
         local_msg.hello_ver = RDMA_HELLO_V2_VERSION;
         local_msg.impl_ver = RDMA_IMPL_V2_VERSION;
         local_msg.block_size = g_rdma_recv_block_size;
         local_msg.sq_size = _ep->_sq_size;
         local_msg.rq_size = _ep->_rq_size;
-        local_msg.lid = GetRdmaLid();
-        local_msg.gid = GetRdmaGid();
+        local_msg.lid = _ep->_device->lid;
+        local_msg.gid = _ep->_device->gid;
         if (BAIDU_LIKELY(_ep->_resource)) {
             local_msg.qp_num = _ep->_resource->qp->qp_num;
         } else {
@@ -257,20 +257,25 @@ bool ValidRdmaHello(const RdmaHello& msg) {
     return true;
 }
 
-void FillLocalRdmaHello(const RdmaEndpoint* ep, RdmaHello* msg) {
-    msg->set_block_size(g_rdma_recv_block_size);
-    msg->set_sq_size(ep->_sq_size);
-    msg->set_rq_size(ep->_rq_size);
-    msg->set_lid(GetRdmaLid());
-    ibv_gid gid = GetRdmaGid();
-    msg->set_gid(std::string(reinterpret_cast<const char*>(gid.raw),
+RdmaHello FillLocalRdmaHello(const RdmaEndpoint* ep) {
+    RdmaHello rdma_hello;
+    rdma_hello.set_block_size(g_rdma_recv_block_size);
+    rdma_hello.set_sq_size(ep->_sq_size);
+    rdma_hello.set_rq_size(ep->_rq_size);
+    rdma_hello.set_lid(ep->_device->lid);
+    ibv_gid gid = ep->_device->gid;
+    rdma_hello.set_gid(std::string(reinterpret_cast<const char*>(gid.raw),
                              sizeof(gid.raw)));
     if (BAIDU_LIKELY(ep->_resource)) {
-        msg->set_qp_num(ep->_resource->qp->qp_num);
+        rdma_hello.set_qp_num(ep->_resource->qp->qp_num);
     } else {
         // Only happens in UT
-        msg->set_qp_num(0);
+        rdma_hello.set_qp_num(0);
     }
+
+    rdma_hello.set_device_name(ep->_device->name);
+
+    return rdma_hello;
 }
 
 int ReadAndParseV3Hello(RdmaEndpoint* ep, RdmaHello* out) {
@@ -298,8 +303,8 @@ int ReadAndParseV3Hello(RdmaEndpoint* ep, RdmaHello* out) {
     return 0;
 }
 
-int WriteV3Hello(RdmaEndpoint* ep, const RdmaHello& msg) {
-    uint32_t pb_size = static_cast<uint32_t>(msg.ByteSizeLong());
+int WriteV3Hello(RdmaEndpoint* ep, const RdmaHello& rdma_hello) {
+    uint32_t pb_size = static_cast<uint32_t>(rdma_hello.ByteSizeLong());
     if (pb_size > RDMA_HELLO_V3_MAX_PB_SIZE) {
         errno = EPROTO;
         return -1;
@@ -311,7 +316,7 @@ int WriteV3Hello(RdmaEndpoint* ep, const RdmaHello& msg) {
     uint32_t pb_size_be = butil::HostToNet32(pb_size);
     packet.append(&pb_size_be, RDMA_HELLO_V3_PB_SIZE_LEN);
     butil::IOBufAsZeroCopyOutputStream output(&packet);
-    if (!msg.SerializeToZeroCopyStream(&output)) {
+    if (!rdma_hello.SerializeToZeroCopyStream(&output)) {
         LOG(ERROR) << "Failed to serialize RdmaHello";
         errno = EPROTO;
         return -1;
@@ -326,14 +331,14 @@ void TranslateHello(const RdmaHello& msg, ParsedHello* out) {
     out->lid = static_cast<uint16_t>(msg.lid());
     fast_memcpy(out->gid.raw, msg.gid().data(), sizeof(out->gid.raw));
     out->qp_num = msg.qp_num();
+    out->device_name = msg.device_name();
 }
 
 }  // namespace v3_wire
 
 int RdmaHandshakeClientV3::SendLocalHello() {
-    RdmaHello local_msg{};
-    v3_wire::FillLocalRdmaHello(_ep, &local_msg);
-    return v3_wire::WriteV3Hello(_ep, local_msg);
+    RdmaHello rdma_hello = v3_wire::FillLocalRdmaHello(_ep);
+    return v3_wire::WriteV3Hello(_ep, rdma_hello);
 }
 
 int RdmaHandshakeClientV3::ReceiveAndParseRemoteHello(ParsedHello* remote,
@@ -376,9 +381,8 @@ int RdmaHandshakeServerV3::ReceiveAndParseRemoteHello(ParsedHello* remote, bool*
 }
 
 int RdmaHandshakeServerV3::SendLocalHello() {
-    RdmaHello local_msg{};
-    v3_wire::FillLocalRdmaHello(_ep, &local_msg);
-    return v3_wire::WriteV3Hello(_ep, local_msg);
+    RdmaHello rdma_hello = v3_wire::FillLocalRdmaHello(_ep);
+    return v3_wire::WriteV3Hello(_ep, rdma_hello);
 }
 
 std::unique_ptr<RdmaHandshake> CreateClientHandshake(RdmaEndpoint* ep) {

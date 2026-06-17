@@ -37,10 +37,12 @@ message RdmaHello {
     // the protobuf layer, so we don't need an extra has_xxx() check
     // in RdmaHelloValid() for presence.
     required uint32 block_size = 1;
-    required uint32 sq_size    = 2;
-    required uint32 rq_size    = 3;
-    required uint32 lid        = 4;
+    required uint32 sq_size = 2;
+    required uint32 rq_size = 3;
+    required uint32 lid = 4;
     // Must be exactly 16 bytes (sizeof(ibv_gid)).
-    required bytes  gid        = 5;
-    required uint32 qp_num     = 6;
+    required bytes gid = 5;
+    required uint32 qp_num = 6;
+
+    optional string device_name = 7;
 }

@@ -47,15 +47,17 @@ class RdmaHandshakeServerV3;
 struct ParsedHello;
 class RdmaHello;
 class RdmaEndpoint;
+struct RdmaDevice;
+
 namespace v2_wire {
-    int ReadBodyAndNegotiate(RdmaEndpoint* ep, ParsedHello* remote, bool* negotiated);
-    int DrainBytes(RdmaEndpoint* ep, size_t n);
+int ReadBodyAndNegotiate(RdmaEndpoint* ep, ParsedHello* remote, bool* negotiated);
+int DrainBytes(RdmaEndpoint* ep, size_t n);
 }  // namespace v2_wire
 
 namespace v3_wire {
-    void FillLocalRdmaHello(const RdmaEndpoint* ep, RdmaHello* msg);
-    int  ReadAndParseV3Hello(RdmaEndpoint* ep, RdmaHello* out);
-    int  WriteV3Hello(RdmaEndpoint* ep, const RdmaHello& msg);
+RdmaHello FillLocalRdmaHello(const RdmaEndpoint* ep);
+int  ReadAndParseV3Hello(RdmaEndpoint* ep, RdmaHello* out);
+int  WriteV3Hello(RdmaEndpoint* ep, const RdmaHello& rdma_hello);
 }  // namespace v3_wire
 
 class RdmaConnect : public AppConnect {
@@ -98,7 +100,7 @@ friend class RdmaHandshakeClientV3;
 friend class RdmaHandshakeServerV3;
 friend int v2_wire::ReadBodyAndNegotiate(RdmaEndpoint*, ParsedHello*, bool*);
 friend int v2_wire::DrainBytes(RdmaEndpoint*, size_t);
-friend void v3_wire::FillLocalRdmaHello(const RdmaEndpoint*, RdmaHello*);
+friend RdmaHello v3_wire::FillLocalRdmaHello(const RdmaEndpoint*);
 friend int  v3_wire::ReadAndParseV3Hello(RdmaEndpoint*, RdmaHello*);
 friend int  v3_wire::WriteV3Hello(RdmaEndpoint*, const RdmaHello&);
 public:
@@ -225,7 +227,7 @@ private:
     // the SQ/RQ window capacities. Called by both
     // ProcessHandshakeAtClient and ProcessHandshakeAtServer after the
     // peer's hello has been validated.
-    void ApplyRemoteHello(const ParsedHello& remote);
+    void ApplyRemoteHello(const ParsedHello& remote, SocketUniquePtr& s);
 
     // Bringup the QP from RESET state to RTS state
     // Arguments:
@@ -273,6 +275,9 @@ private:
 
     // rdma resource
     RdmaResource* _resource;
+
+    // The RDMA device used by this endpoint.
+    RdmaDevice const* _device;
 
     // The number of events requiring ack.
     unsigned int _send_cq_events;

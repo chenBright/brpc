@@ -20,6 +20,9 @@
 
 #if BRPC_WITH_RDMA
 
+#include <vector>
+#include "brpc/rdma/rdma_helper.h"
+
 namespace brpc {
 namespace rdma {
 
@@ -66,13 +69,18 @@ namespace rdma {
 // must call initialization of the block_pool. Otherwise the behavior is
 // undefined.
 
-typedef uint32_t (*RegisterCallback)(void*, size_t);
+// lkey per device (indexed by pd_index). Entry is 0 on failure.
+typedef std::vector<uint32_t> RegisterIds;
+
+typedef RegisterIds (*RegisterCallback)(void*, size_t);
+
 
 // Initialize the block pool
 // The argument is a callback called when the pool is enlarged with a new
 // region. It should be the memory registration in brpc. However,
-// in block_pool, we just abstract it into a function to get region id.
-// Return the first region's address, NULL if failed and errno is set.
+// in block_pool, we just abstract it into a function to get region ids
+// for all devices.
+// Return true on success, false otherwise.
 bool InitBlockPool(RegisterCallback cb);
 
 // In scenarios where users need to manually specify memory regions (e.g., using
@@ -93,6 +101,8 @@ int DeallocBlock(void* buf);
 
 // Get the region ID of the given buf
 uint32_t GetRegionId(const void* buf);
+// Get the region ID (lkey) of the given buf on the target pd.
+uint32_t GetRegionId(const void* buf, int pd_index);
 
 // Return the block size of given block type
 // type=0: BLOCK_DEFAULT(8KB)
