@@ -21,6 +21,7 @@
 #include "butil/logging.h"                       // CHECK
 #include "butil/time.h"                          // cpuwide_time_us
 #include "butil/fd_utility.h"                    // make_non_blocking
+#include "butil/debug/thread_annotations.h"      // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "bthread/bthread.h"                     // bthread_start_background
 #include "bthread/unstable.h"                   // bthread_flush
 #include "bvar/bvar.h"                          // bvar::Adder
@@ -36,6 +37,16 @@ namespace brpc {
 InputMessenger* g_messenger = NULL;
 static pthread_once_t g_messenger_init = PTHREAD_ONCE_INIT;
 static void InitClientSideMessenger() {
+    // g_messenger is published here once via pthread_once, but the hot-path
+    // reader get_client_side_messenger() (in input_messenger.h) is
+    // BUTIL_FORCE_INLINE and reads g_messenger directly without going through
+    // pthread_once. ThreadSanitizer cannot observe the happens-before
+    // relationship established by pthread_once in that case and reports a
+    // benign data race. Annotate the address as a benign race BEFORE the store
+    // so the report is suppressed without touching the inlined hot path.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &g_messenger, sizeof(g_messenger),
+        "g_messenger is initialized once via pthread_once");
     g_messenger = new InputMessenger;
 }
 InputMessenger* get_or_new_client_side_messenger() {

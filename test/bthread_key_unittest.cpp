@@ -453,10 +453,23 @@ static void* usleep_thread(void* args) {
     return NULL;
 }
 
+// ThreadSanitizer caps the total number of live threads + fibers at ~8128.
+// This is a compile-time limit that cannot be raised at runtime. Each
+// concurrently alive bthread needs its own stack, and brpc binds one TSan
+// fiber per bthread stack (see BTHREAD_TSAN_CREATE_FIBER in stack_inl.h), so
+// launching 25000 concurrent bthreads would exceed the limit and make TSan
+// abort with "Thread limit exceeded. Dying.". Use a smaller batch under TSan
+// while keeping the original scale for normal builds.
+#ifdef BUTIL_USE_TSAN
+static const size_t kManyBthreads = 4000;
+#else
+static const size_t kManyBthreads = 25000;
+#endif
+
 static void launch_many_bthreads(PoolData2* data) {
     std::vector<bthread_t> tids;
-    tids.reserve(25000);
-    for (size_t i = 0; i < 25000; ++i) {
+    tids.reserve(kManyBthreads);
+    for (size_t i = 0; i < kManyBthreads; ++i) {
         bthread_t t0;
         PoolData2* data_tmp = new PoolData2();
         data_tmp->key = data->key;
@@ -491,7 +504,7 @@ TEST(KeyTest, frequently_borrow_keytable_when_using_pool) {
     ASSERT_EQ(0, bthread_join(bth, NULL));
     std::cout << "Free keytable size is "
               << bthread_keytable_pool_size(&test_pool)
-              << " use keytable size is 25000" << std::endl;
+              << " use keytable size is " << kManyBthreads << std::endl;
     ASSERT_EQ(0, bthread_keytable_pool_destroy(&test_pool));
     ASSERT_EQ(0, bthread_key_delete(data.key));
 }

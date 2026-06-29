@@ -36,13 +36,13 @@ pthread_mutex_t wake_mutex = PTHREAD_MUTEX_INITIALIZER;
 long signal_start_time = 0;
 std::vector<bthread_t> wake_tid;
 std::vector<long> wake_time;
-volatile bool stop = false;
+butil::atomic<bool> stop(false);
 const long SIGNAL_INTERVAL_US = 10000;
 
 void* signaler(void* void_arg) {
     Arg* a = (Arg*)void_arg;
     signal_start_time = butil::gettimeofday_us();
-    while (!stop) {
+    while (!stop.load(butil::memory_order_relaxed)) {
         bthread_usleep(SIGNAL_INTERVAL_US);
         bthread_cond_signal(&a->c);
     }
@@ -52,7 +52,7 @@ void* signaler(void* void_arg) {
 void* waiter(void* void_arg) {
     Arg* a = (Arg*)void_arg;
     bthread_mutex_lock(&a->m);
-    while (!stop) {
+    while (!stop.load(butil::memory_order_relaxed)) {
         bthread_cond_wait(&a->c, &a->m);
         
         BAIDU_SCOPED_LOCK(wake_mutex);
@@ -70,7 +70,7 @@ TEST(CondTest, sanity) {
     // has no effect
     ASSERT_EQ(0, bthread_cond_signal(&a.c));
 
-    stop = false;
+    stop.store(false, butil::memory_order_relaxed);
     wake_tid.resize(1024);
     wake_tid.clear();
     wake_time.resize(1024);
@@ -91,7 +91,7 @@ TEST(CondTest, sanity) {
     const size_t nbeforestop = wake_time.size();
     pthread_mutex_unlock(&wake_mutex);
     
-    stop = true;
+    stop.store(true, butil::memory_order_relaxed);
     for (size_t i = 0; i < NW; ++i) {
         bthread_cond_signal(&a.c);
     }
@@ -146,7 +146,7 @@ std::atomic<int> WrapperArg::wake_time{0};
 void* cv_signaler(void* void_arg) {
     WrapperArg* a = (WrapperArg*)void_arg;
     signal_start_time = butil::gettimeofday_us();
-    while (!stop) {
+    while (!stop.load(butil::memory_order_relaxed)) {
         bthread_usleep(SIGNAL_INTERVAL_US);
         a->cond.notify_one();
     }
@@ -156,7 +156,7 @@ void* cv_signaler(void* void_arg) {
 void* cv_bmutex_waiter(void* void_arg) {
     WrapperArg* a = (WrapperArg*)void_arg;
     std::unique_lock<bthread_mutex_t> lck(*a->mutex.native_handler());
-    while (!stop) {
+    while (!stop.load(butil::memory_order_relaxed)) {
         a->cond.wait(lck);
     }
     return NULL;
@@ -165,7 +165,7 @@ void* cv_bmutex_waiter(void* void_arg) {
 void* cv_mutex_waiter(void* void_arg) {
     WrapperArg* a = (WrapperArg*)void_arg;
     std::unique_lock<bthread::Mutex> lck(a->mutex);
-    while (!stop) {
+    while (!stop.load(butil::memory_order_relaxed)) {
         a->cond.wait(lck);
     }
     return NULL;
@@ -196,7 +196,7 @@ void* cv_mutex_waiter_with_pred(void* void_arg) {
 #endif
 
 TEST(CondTest, cpp_wrapper) {
-    stop = false;
+    stop.store(false, butil::memory_order_relaxed);
     bthread::ConditionVariable cond;
     pthread_t bmutex_waiter_threads[8];
     pthread_t mutex_waiter_threads[8];
@@ -212,7 +212,7 @@ TEST(CondTest, cpp_wrapper) {
     bthread_usleep(100L * 1000);
     {
         BAIDU_SCOPED_LOCK(a.mutex);
-        stop = true;
+        stop.store(true, butil::memory_order_relaxed);
     }
     pthread_join(signal_thread, NULL);
     a.cond.notify_all();
@@ -223,7 +223,7 @@ TEST(CondTest, cpp_wrapper) {
 }
 
 TEST(CondTest, cpp_wrapper2) {
-    stop = false;
+    stop.store(false, butil::memory_order_relaxed);
     bthread::ConditionVariable cond;
     pthread_t bmutex_waiter_threads[8];
     pthread_t mutex_waiter_threads[8];
@@ -240,7 +240,7 @@ TEST(CondTest, cpp_wrapper2) {
     ASSERT_EQ(WrapperArg::wake_time, 0);
     {
         BAIDU_SCOPED_LOCK(a.mutex);
-        stop = true;
+        stop.store(true, butil::memory_order_relaxed);
         a.ready = true;
 
     }
@@ -282,7 +282,7 @@ private:
 };
 
 struct PingPongArg {
-    bool stopped;
+    butil::atomic<bool> stopped;
     Signal sig1;
     Signal sig2;
     butil::atomic<int> nthread;
@@ -294,7 +294,7 @@ void *ping_pong_thread(void* arg) {
     long local_count = 0;
     bool odd = (a->nthread.fetch_add(1)) % 2;
     int old_signal = 0;
-    while (!a->stopped) {
+    while (!a->stopped.load(butil::memory_order_relaxed)) {
         if (odd) {
             a->sig1.notify();
             old_signal = a->sig2.wait(old_signal);
@@ -310,7 +310,7 @@ void *ping_pong_thread(void* arg) {
 
 TEST(CondTest, ping_pong) {
     PingPongArg arg;
-    arg.stopped = false;
+    arg.stopped.store(false, butil::memory_order_relaxed);
     arg.nthread = 0;
     bthread_t threads[2];
     ProfilerStart("cond.prof");
@@ -318,7 +318,7 @@ TEST(CondTest, ping_pong) {
         ASSERT_EQ(0, bthread_start_urgent(&threads[i], NULL, ping_pong_thread, &arg));
     }
     usleep(1000 * 1000);
-    arg.stopped = true;
+    arg.stopped.store(true, butil::memory_order_relaxed);
     arg.sig1.notify();
     arg.sig2.notify();
     for (int i = 0; i < 2; ++i) {
@@ -448,13 +448,13 @@ private:
     bthread_mutex_t _mutex;
 };
 
-#ifndef BUTIL_USE_ASAN
-volatile bool g_stop = false;
+#if !defined(BUTIL_USE_ASAN) && !defined(BUTIL_USE_TSAN)
+butil::atomic<bool> g_stop(false);
 bool started_wait = false;
 bool ended_wait = false;
 
 void* usleep_thread(void *) {
-    while (!g_stop) {
+    while (!g_stop.load(butil::memory_order_relaxed)) {
         bthread_usleep(1000L * 1000L);
     }
     return NULL;
@@ -469,7 +469,7 @@ void* wait_cond_thread(void* arg) {
 }
 
 static void launch_many_bthreads() {
-    g_stop = false;
+    g_stop.store(false, butil::memory_order_relaxed);
     bthread_t tid;
     BthreadCond c;
     c.Init();
@@ -487,7 +487,7 @@ static void launch_many_bthreads() {
     LOG(INFO) << "Creating bthreads took " << tm.u_elapsed() << " us";
     usleep(3 * 1000 * 1000L);
     c.Signal();
-    g_stop = true;
+    g_stop.store(true, butil::memory_order_relaxed);
     bthread_join(tid, NULL);
     for (size_t i = 0; i < tids.size(); ++i) {
         LOG_EVERY_SECOND(INFO) << "Joined " << i << " threads";

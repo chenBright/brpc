@@ -27,6 +27,7 @@
                                   // e.g. bthread_usleep
 #include <google/protobuf/service.h>                 // google::protobuf::Service
 #include "butil/macros.h"                            // DISALLOW_COPY_AND_ASSIGN
+#include "butil/atomicops.h"                          // butil::atomic
 #include "butil/containers/doubly_buffered_data.h"   // DoublyBufferedData
 #include "bvar/bvar.h"
 #include "butil/containers/case_ignored_flat_map.h"  // [CaseIgnored]FlatMap
@@ -543,7 +544,7 @@ public:
     const ServerOptions& options() const { return _options; }
 
     // Status of this server.
-    Status status() const { return _status; }
+    Status status() const { return _status.load(butil::memory_order_relaxed); }
 
     // Return true iff this server is serving requests.
     bool IsRunning() const { return status() == RUNNING; }
@@ -736,7 +737,11 @@ friend class Controller;
     SimpleDataPool* _session_local_data_pool;
     ThreadLocalOptions _tl_options;
 
-    Status _status;
+    // Concurrently read by request-handling bthreads (via status()/IsRunning())
+    // while written by Start()/Stop()/Join() on another thread, so it must be
+    // atomic. Relaxed ordering is sufficient: it is only a best-effort gate and
+    // the surrounding accept/join paths carry their own synchronization.
+    butil::atomic<Status> _status;
     int _builtin_service_count;
     // number of the virtual services for mapping URL to methods.
     int _virtual_service_count;

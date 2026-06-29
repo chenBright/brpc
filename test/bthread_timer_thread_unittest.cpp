@@ -20,10 +20,18 @@
 #include "bthread/sys_futex.h"
 #include "bthread/timer_thread.h"
 #include "bthread/bthread.h"
+#include "butil/atomicops.h"
+#include "butil/compiler_specific.h"  // BUTIL_USE_TSAN
 #include "butil/logging.h"
+#include "butil/scoped_lock.h"
+#include "butil/synchronization/lock.h"
 
 namespace {
 
+// All tests in this file assert on timer scheduling latency, which is
+// unreliable and very slow under ThreadSanitizer, so they are disabled
+// when TSan is on.
+#ifndef BUTIL_USE_TSAN
 long timespec_diff_us(const timespec& ts1, const timespec& ts2) {
     return (ts1.tv_sec - ts2.tv_sec) * 1000000L +
         (ts1.tv_nsec - ts2.tv_nsec) / 1000;
@@ -50,12 +58,15 @@ public:
         timespec current_time;
         clock_gettime(CLOCK_REALTIME, &current_time);
         if (_name) {
-            LOG(INFO) << "Run `" << _name << "' task_id=" << _task_id;
+            LOG(INFO) << "Run `" << _name << "' task_id=" << _task_id.load();
         } else {
-            LOG(INFO) << "Run task_id=" << _task_id;
+            LOG(INFO) << "Run task_id=" << _task_id.load();
         }
-        _run_times.push_back(current_time);
-        const int saved_sleep_ms = _sleep_ms;
+        {
+            BAIDU_SCOPED_LOCK(_mutex);
+            _run_times.push_back(current_time);
+        }
+        const int saved_sleep_ms = _sleep_ms.load();
         if (saved_sleep_ms > 0) {
             timespec timeout = butil::milliseconds_to_timespec(saved_sleep_ms);
             bthread::futex_wait_private(&_sleep_ms, saved_sleep_ms, &timeout);
@@ -63,12 +74,12 @@ public:
     }
 
     void wakeup() {
-        if (_sleep_ms != 0) {
-            _sleep_ms = 0;
+        if (_sleep_ms.load() != 0) {
+            _sleep_ms.store(0);
             bthread::futex_wake_private(&_sleep_ms, 1);
         } else {
             LOG(ERROR) << "No need to wakeup "
-                       << (_name ? _name : "") << " task_id=" << _task_id;
+                       << (_name ? _name : "") << " task_id=" << _task_id.load();
         }
     }
 
@@ -80,12 +91,18 @@ public:
 
     void expect_first_run(timespec expect_run_time)
     {
-        ASSERT_TRUE(!_run_times.empty());
-        long diff = timespec_diff_us(_run_times[0], expect_run_time);
+        timespec first_run_time;
+        {
+            BAIDU_SCOPED_LOCK(_mutex);
+            ASSERT_TRUE(!_run_times.empty());
+            first_run_time = _run_times[0];
+        }
+        long diff = timespec_diff_us(first_run_time, expect_run_time);
         EXPECT_LE(labs(diff), 50000);
     }
     
     void expect_not_run() {
+        BAIDU_SCOPED_LOCK(_mutex);
         EXPECT_TRUE(_run_times.empty());
     }
 
@@ -96,11 +113,13 @@ public:
     }
 
     timespec _expect_run_time;
-    bthread::TimerThread::TaskId _task_id;
+    butil::atomic<bthread::TimerThread::TaskId> _task_id{
+        bthread::TimerThread::INVALID_TASK_ID};
 
 private:
     const char* _name;
-    int _sleep_ms;
+    butil::atomic<int> _sleep_ms;
+    mutable butil::Mutex _mutex;
     std::vector<timespec> _run_times;
 };
 
@@ -129,8 +148,8 @@ TEST(TimerThreadTest, RunTasks) {
     // sleep 1 second, and unschedule task2
     LOG(INFO) << "Sleep 1s";
     sleep(1);
-    timer_thread.unschedule(keeper2._task_id);
-    timer_thread.unschedule(keeper4._task_id);
+    timer_thread.unschedule(keeper2._task_id.load());
+    timer_thread.unschedule(keeper4._task_id.load());
 
     timespec old_time = { 0, 0 };
     TimeKeeper keeper6(old_time, "keeper6");
@@ -163,10 +182,10 @@ TEST(TimerThreadTest, start_after_schedule) {
     timespec past_time = { 0, 0 };
     TimeKeeper keeper(past_time, "keeper1");
     keeper.schedule(&timer_thread);
-    ASSERT_EQ(bthread::TimerThread::INVALID_TASK_ID, keeper._task_id);
+    ASSERT_EQ(bthread::TimerThread::INVALID_TASK_ID, keeper._task_id.load());
     ASSERT_EQ(0, timer_thread.start(NULL));
     keeper.schedule(&timer_thread);
-    ASSERT_NE(bthread::TimerThread::INVALID_TASK_ID, keeper._task_id);
+    ASSERT_NE(bthread::TimerThread::INVALID_TASK_ID, keeper._task_id.load());
     timespec current_time = butil::seconds_from_now(0);
     sleep(1);  // make sure timer thread start and run
     timer_thread.stop_and_join();
@@ -187,7 +206,7 @@ public:
     {
         clock_gettime(CLOCK_REALTIME, &_running_time);
         EXPECT_EQ(_expected_unschedule_result,
-                  _timer_thread->unschedule(_keeper1->_task_id));
+                  _timer_thread->unschedule(_keeper1->_task_id.load()));
         _keeper2->schedule(_timer_thread);
     }
 
@@ -237,7 +256,7 @@ TEST(TimerThreadTest, schedule_and_unschedule_in_task) {
     keeper4.expect_not_run();
 
     // unscheduling (running) keeper5 should have no effect and returns 1
-    ASSERT_EQ(1, timer_thread.unschedule(keeper5._task_id));
+    ASSERT_EQ(1, timer_thread.unschedule(keeper5._task_id.load()));
     
     // wake up keeper5 to let test_task1/2 run.
     keeper5.wakeup();
@@ -253,5 +272,17 @@ TEST(TimerThreadTest, schedule_and_unschedule_in_task) {
     keeper4.expect_first_run(test_task2._running_time);
     keeper5.expect_first_run();
 }
+#else
+// Under ThreadSanitizer all timing-based tests above are disabled. Keep a
+// placeholder test so this translation unit still references gtest symbols and
+// gets linked against libgtest; otherwise the object file contains no tests,
+// the linker drops libgtest, and gtest_main's main() fails with undefined
+// references to testing::InitGoogleTest etc.
+TEST(TimerThreadTest, all_timing_tests_disabled_under_tsan) {
+    // Intentionally empty: the real timer scheduling-latency tests above are
+    // compiled out under TSan. This placeholder keeps the TU non-empty so it
+    // links against gtest_main.
+}
+#endif // BUTIL_USE_TSAN
 
 } // end namespace

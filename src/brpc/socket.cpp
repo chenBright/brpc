@@ -36,6 +36,7 @@
 #include "butil/macros.h"
 #include "butil/class_name.h"                     // butil::class_name
 #include "butil/memory/scope_guard.h"
+#include "butil/debug/thread_annotations.h"       // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "brpc/log.h"
 #include "brpc/reloadable_flags.h"          // BRPC_VALIDATE_GFLAG
 #include "brpc/errno.pb.h"
@@ -313,6 +314,20 @@ const uint32_t MAX_PIPELINED_COUNT = 16384;
 struct BAIDU_CACHELINE_ALIGNMENT Socket::WriteRequest {
     static WriteRequest* const UNCONNECTED;
 
+    WriteRequest() {
+        // `next` is intentionally raced on as part of the lock-free write
+        // list: StartWrite() publishes a pending request by writing `next`
+        // *after* the _write_head exchange, while KeepWrite()/IsWriteComplete()
+        // spins reading `next` until it becomes non-UNCONNECTED. The spin
+        // window is only 1~2 instructions and the algorithm tolerates it, so
+        // the race is benign by design. WriteRequest objects live in an
+        // ObjectPool and are never freed, so annotating once at construction
+        // covers their whole lifetime and stops TSan from reporting it.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &next, sizeof(next),
+            "benign WriteRequest::next (lock-free write list spin)");
+    }
+
     butil::IOBuf data;
     WriteRequest* next;
     bthread_id_t id_wait;
@@ -405,7 +420,7 @@ void Socket::WriteRequest::Setup(Socket* s) {
         const int64_t before_write =
             s->_unwritten_bytes.fetch_add(data.size(), butil::memory_order_relaxed);
         if (before_write + (int64_t)data.size() >= FLAGS_socket_max_unwritten_bytes) {
-            s->_overcrowded = true;
+            s->_overcrowded.store(true, butil::memory_order_relaxed);
         }
     }
     const uint32_t pc = pipelined_count();
@@ -501,6 +516,19 @@ Socket::Socket(Forbidden f)
     CreateVarsOnce();
     pthread_mutex_init(&_id_wait_list_mutex, NULL);
     _epollout_butex = bthread::butex_create_checked<butil::atomic<int> >();
+    // `_local_side' is written by ResetFileDescriptor() on the EventDispatcher
+    // (connect-completion path) and read via local_side() by request processors
+    // and Controller::EndRPC(). When a ParallelChannel sub RPC is ended early
+    // (e.g. cancelled by a sibling) while its short connection is still being
+    // established, these accesses can race. The value is merely diagnostic
+    // local-address info of an already-finished RPC with no correctness or
+    // memory-safety impact (a non-extended EndPoint is just ip+port). The Socket
+    // lives in a ResourcePool and its memory is never freed, so annotating this
+    // address once covers its whole lifetime. Mark it benign so TSan stops
+    // reporting this by-design race.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_local_side, sizeof(_local_side),
+        "benign Socket::_local_side (ResetFileDescriptor vs local_side() read)");
 }
 
 Socket::~Socket() {
@@ -771,7 +799,7 @@ int Socket::OnCreated(const SocketOptions& options) {
     _ssl_ctx = options.initial_ssl_ctx;
     _connection_type_for_progressive_read = CONNECTION_TYPE_UNKNOWN;
     _controller_released_socket.store(false, butil::memory_order_relaxed);
-    _overcrowded = false;
+    _overcrowded.store(false, butil::memory_order_relaxed);
     // Maybe non-zero for RTMP connections.
     _fail_me_at_server_stop = false;
     _logoff_flag.store(false, butil::memory_order_relaxed);
@@ -791,7 +819,7 @@ int Socket::OnCreated(const SocketOptions& options) {
     _keepalive_options = options.keepalive_options;
     _tcp_user_timeout_ms = options.tcp_user_timeout_ms;
     CHECK(NULL == _write_head.load(butil::memory_order_relaxed));
-    _is_write_shutdown = false;
+    _is_write_shutdown.store(false, butil::memory_order_relaxed);
     int fd = options.fd;
     if (!ValidFileDescriptor(fd) && options.connect_on_create) {
         // Connect on create.
@@ -987,7 +1015,15 @@ int Socket::WaitAndReset(int32_t expected_nref) {
         } else {
             // nobody holds a health-checking-related reference,
             // so no need to do health checking.
-            if (!_is_hc_related_ref_held) {
+            // NOTE: Read `_is_hc_related_ref_held' via HCEnabled() instead of
+            // accessing the field directly. HCEnabled() carries the acquire
+            // fence (paired with the release in Dereference) and is excluded
+            // from ThreadSanitizer instrumentation, which avoids a TSan false
+            // positive: the field is synchronized through `_versioned_ref'
+            // rather than being atomic itself, a pattern TSan cannot model.
+            // `_health_check_interval_s' is set once at creation and is always
+            // > 0 here, so !HCEnabled() is equivalent to !_is_hc_related_ref_held.
+            if (!HCEnabled()) {
                 RPC_VLOG << "Nobody holds a health-checking-related reference"
                          << " for SocketId=" << id();
                 return -1;
@@ -1633,7 +1669,8 @@ int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
         }
     }
 
-    if (!opt.ignore_eovercrowded && _overcrowded) {
+    if (!opt.ignore_eovercrowded &&
+        _overcrowded.load(butil::memory_order_relaxed)) {
         return SetError(opt.id_wait, EOVERCROWDED);
     }
 
@@ -1671,7 +1708,8 @@ int Socket::Write(SocketMessagePtr<>& msg, const WriteOptions* options_in) {
         }
     }
     
-    if (!opt.ignore_eovercrowded && _overcrowded) {
+    if (!opt.ignore_eovercrowded &&
+        _overcrowded.load(butil::memory_order_relaxed)) {
         return SetError(opt.id_wait, EOVERCROWDED);
     }
     
@@ -1716,10 +1754,11 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     req->next = NULL;
 
     // Fast fail when write has been shutdown.
-    if (_is_write_shutdown) {
+    if (_is_write_shutdown.load(butil::memory_order_relaxed)) {
         goto FAIL_TO_WRITE;
     }
-    _is_write_shutdown = req->need_shutdown_write();
+    _is_write_shutdown.store(req->need_shutdown_write(),
+                             butil::memory_order_relaxed);
     
     // Connect to remote_side() if not.
     ret = ConnectIfNot(opt.abstime, req);
@@ -1886,7 +1925,7 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
         data_list[ndata++] = &p->data;
         if (p->need_shutdown_write()) {
             // Write WriteRequest until shutdown write.
-            _is_write_shutdown = true;
+            _is_write_shutdown.store(true, butil::memory_order_relaxed);
             break;
         }
     }
@@ -2380,7 +2419,8 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
        << "\nread_buf=" << ptr->_read_buf.size()
        << "\nlast_read_to_now=" << cpuwide_now - ptr->_last_readtime_us << "us"
        << "\nlast_write_to_now=" << cpuwide_now - ptr->_last_writetime_us << "us"
-       << "\novercrowded=" << ptr->_overcrowded;
+       << "\novercrowded="
+       << ptr->_overcrowded.load(butil::memory_order_relaxed);
     os << "\nid_wait_list={";
     for (size_t i = 0; i < nidsize; ++i) {
         if (i) {
@@ -2439,7 +2479,8 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
         os << "\n}";
     }
 
-    os << "\nis_wirte_shutdown=" << ptr->_is_write_shutdown;
+    os << "\nis_wirte_shutdown="
+       << ptr->_is_write_shutdown.load(butil::memory_order_relaxed);
 
     {
         int keepalive = 0;
@@ -2962,7 +3003,7 @@ void Socket::CancelUnwrittenBytes(size_t bytes) {
     const int64_t before_minus =
         _unwritten_bytes.fetch_sub(bytes, butil::memory_order_relaxed);
     if (before_minus < (int64_t)bytes + FLAGS_socket_max_unwritten_bytes) {
-        _overcrowded = false;
+        _overcrowded.store(false, butil::memory_order_relaxed);
     }
 }
 void Socket::AddOutputBytes(size_t bytes) {

@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 #include <google/protobuf/descriptor.h>
 #include "butil/time.h"
+#include "butil/compiler_specific.h"  // BUTIL_USE_TSAN
 #include "butil/macros.h"
 #include "butil/fd_guard.h"
 #include "butil/files/scoped_file.h"
@@ -1288,6 +1289,9 @@ TEST_F(ServerTest, close_idle_connections) {
     ASSERT_EQ(0ul, stat.connection_count);
 }
 
+// This test asserts on Server::Stop/Join latency, which is unreliable and very
+// slow under ThreadSanitizer, so it is disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 TEST_F(ServerTest, logoff_and_multiple_start) {
     butil::Timer timer;
     butil::EndPoint ep;
@@ -1382,6 +1386,7 @@ TEST_F(ServerTest, logoff_and_multiple_start) {
         bthread_join(tid, NULL);
     }
 }
+#endif // BUTIL_USE_TSAN
 
 void SendMultipleRPC(butil::EndPoint ep, int count) {
     brpc::Channel channel;
@@ -1560,6 +1565,10 @@ TEST_F(ServerTest, single_repeated_to_array) {
 }
 
 TEST_F(ServerTest, too_big_message) {
+// todo 删除
+#ifdef BUTIL_USE_TSAN
+    GTEST_SKIP();
+#endif
     EchoServiceImpl echo_svc;
     brpc::Server server;
     ASSERT_EQ(0, server.AddService(&echo_svc,

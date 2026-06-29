@@ -39,6 +39,7 @@
 #include "butil/process_util.h"            // ReadCommandLine
 #include "butil/popen.h"                   // read_command_output
 #include "bvar/passive_status.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 namespace bvar {
 
@@ -137,18 +138,24 @@ class CachedReader {
 public:
     CachedReader() : _mtime_us(0), _cached{} {
         CHECK_EQ(0, pthread_mutex_init(&_mutex, NULL));
+        // `_mtime_us` is read without the lock as a fast-path check and only
+        // written under the lock. A stale read at worst causes one extra/late
+        // refresh, which is acceptable, so tell ThreadSanitizer to treat races
+        // on it as benign instead of making it an atomic.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &_mtime_us, sizeof(_mtime_us),
+            "Benign race on CachedReader::_mtime_us");
     }
     ~CachedReader() {
         pthread_mutex_destroy(&_mutex);
     }
 
-    // NOTE: may return a volatile value that may be overwritten at any time.
-    // This is acceptable right now. Both 32-bit and 64-bit numbers are atomic
-    // to fetch in 64-bit machines(most of baidu machines) and the code inside
-    // this .cpp utilizing this class generally return a struct with 32-bit
-    // and 64-bit numbers.
+    // Returns a copy of the cached value. The copy is fetched while holding
+    // the lock so it won't race with concurrent updates to `_cached`. The
+    // lock-free read of `_mtime_us` below is a benign race annotated in the
+    // constructor.
     template <typename ReadFn>
-    static const T& get_value(const ReadFn& fn) {
+    static T get_value(const ReadFn& fn) {
         CachedReader* p = butil::get_leaky_singleton<CachedReader>();
         const int64_t now = butil::cpuwide_time_us();
         if (now > p->_mtime_us + CACHED_INTERVAL_US) {
@@ -168,7 +175,12 @@ public:
             }
             pthread_mutex_unlock(&p->_mutex);
         }
-        return p->_cached;
+        // Fetch the cached value under the lock to avoid data race with the
+        // concurrent writer above.
+        pthread_mutex_lock(&p->_mutex);
+        T result = p->_cached;
+        pthread_mutex_unlock(&p->_mutex);
+        return result;
     }
 
 private:
@@ -184,8 +196,8 @@ public:
     }
     template <typename T, size_t offset>
     static T get_field(void*) {
-        return *(T*)((char*)&CachedReader<ProcStat>::get_value(
-                         ProcStatReader()) + offset);
+        const ProcStat stat = CachedReader<ProcStat>::get_value(ProcStatReader());
+        return *(T*)((char*)&stat + offset);
     }
 };
 
@@ -262,8 +274,8 @@ public:
     template <typename T, size_t offset>
     static T get_field(void*) {
         static int64_t pagesize = getpagesize();
-        return *(T*)((char*)&CachedReader<ProcMemory>::get_value(
-                         ProcMemoryReader()) + offset) * pagesize;
+        const ProcMemory m = CachedReader<ProcMemory>::get_value(ProcMemoryReader());
+        return *(T*)((char*)&m + offset) * pagesize;
     }
 };
 
@@ -322,8 +334,8 @@ public:
     };
     template <typename T, size_t offset>
     static T get_field(void*) {
-        return *(T*)((char*)&CachedReader<LoadAverage>::get_value(
-                         LoadAverageReader()) + offset);
+        const LoadAverage la = CachedReader<LoadAverage>::get_value(LoadAverageReader());
+        return *(T*)((char*)&la + offset);
     }
 };
 
@@ -480,8 +492,8 @@ public:
     }
     template <typename T, size_t offset>
     static T get_field(void*) {
-        return *(T*)((char*)&CachedReader<ProcIO>::get_value(
-                         ProcIOReader()) + offset);
+        const ProcIO io = CachedReader<ProcIO>::get_value(ProcIOReader());
+        return *(T*)((char*)&io + offset);
     }
 };
 
@@ -590,8 +602,8 @@ public:
     }
     template <typename T, size_t offset>
     static T get_field(void*) {
-        return *(T*)((char*)&CachedReader<DiskStat>::get_value(
-                         DiskStatReader()) + offset);
+        const DiskStat ds = CachedReader<DiskStat>::get_value(DiskStatReader());
+        return *(T*)((char*)&ds + offset);
     }
 };
 
@@ -655,8 +667,8 @@ public:
     }
     template <typename T, size_t offset>
     static T get_field(void*) {
-        return *(T*)((char*)&CachedReader<rusage>::get_value(
-                         RUsageReader()) + offset);
+        const rusage ru = CachedReader<rusage>::get_value(RUsageReader());
+        return *(T*)((char*)&ru + offset);
     }
 };
 

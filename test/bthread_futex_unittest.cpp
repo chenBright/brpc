@@ -30,7 +30,7 @@
 #include <bthread/processor.h>
 
 namespace {
-volatile bool stop = false;
+butil::atomic<bool> stop(false);
 
 butil::atomic<int> nthread(0);
 
@@ -121,8 +121,9 @@ TEST(FutexTest, futex_wake_many_waiters_perf) {
     
     int lock1 = 0;
     size_t N = 0;
-    pthread_t th;
-    for (; N < 1000 && !pthread_create(&th, NULL, dummy_waiter, &lock1); ++N) {}
+    pthread_t th[1000];
+    for (; N < ARRAY_SIZE(th) &&
+           !pthread_create(&th[N], NULL, dummy_waiter, &lock1); ++N) {}
     
     sleep(1);
     int nwakeup = 0;
@@ -145,6 +146,12 @@ TEST(FutexTest, futex_wake_many_waiters_perf) {
     tm.stop();
     ASSERT_EQ(0, nwakeup);
     printf("futex_wake nop = %" PRId64 "ns\n", tm.n_elapsed() / REP);
+
+    // Join all waiter threads to avoid leaking them. After the wakeups
+    // above all dummy_waiter threads have returned from futex_wait.
+    for (size_t i = 0; i < N; ++i) {
+        pthread_join(th[i], NULL);
+    }
 }
 
 butil::atomic<int> nevent(0);

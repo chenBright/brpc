@@ -19,6 +19,7 @@
 
 #include <map>
 #include <gflags/gflags.h>
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "butil/memory/singleton_on_pthread_once.h"
 #include "butil/threading/platform_thread.h"
 #include "bvar/bvar.h"
@@ -121,6 +122,17 @@ Collector::Collector()
     , _ngrab(0)
     , _ndrop(0)
     , _ndump(0) {
+    // These fields are exported as bvars and sampled asynchronously. They are
+    // statistics for monitoring only, so occasionally stale values are OK.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&_last_active_cpuwide_us,
+                                           sizeof(_last_active_cpuwide_us),
+                                           "Collector last active timestamp is sampled without locking");
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&_ngrab, sizeof(_ngrab),
+                                           "Collector grab count is sampled without locking");
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&_ndrop, sizeof(_ndrop),
+                                           "Collector drop count is sampled without locking");
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&_ndump, sizeof(_ndump),
+                                           "Collector dump count is sampled without locking");
     pthread_mutex_init(&_dump_thread_mutex, NULL);
     pthread_cond_init(&_dump_thread_cond, NULL);
     pthread_mutex_init(&_sleep_mutex, NULL);
@@ -167,6 +179,10 @@ void Collector::grab_thread() {
     bvar::PassiveStatus<int64_t> pending_sampled_data(
         "bvar_collector_pending_samples", get_pending_count, this);
     double busy_seconds = 0;
+    // busy_seconds is intentionally sampled by bvar's sampler thread while it
+    // is updated by the collector thread. It is a best-effort monitoring value.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&busy_seconds, sizeof(busy_seconds),
+                                           "Collector grab thread usage is sampled without locking");
     bvar::PassiveStatus<double> busy_seconds_var(deref_value<double>, &busy_seconds);
     bvar::PerSecond<bvar::PassiveStatus<double> > busy_seconds_second(
         "bvar_collector_grab_thread_usage", &busy_seconds_var);
@@ -364,6 +380,10 @@ void Collector::dump_thread() {
 
     // vars
     double busy_seconds = 0;
+    // busy_seconds is intentionally sampled by bvar's sampler thread while it
+    // is updated by the dump thread. It is a best-effort monitoring value.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&busy_seconds, sizeof(busy_seconds),
+                                           "Collector dump thread usage is sampled without locking");
     bvar::PassiveStatus<double> busy_seconds_var(deref_value<double>, &busy_seconds);
     bvar::PerSecond<bvar::PassiveStatus<double> > busy_seconds_second(
         "bvar_collector_dump_thread_usage", &busy_seconds_var);

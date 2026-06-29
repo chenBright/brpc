@@ -18,12 +18,13 @@
 #include <gtest/gtest.h>
 #include "gperftools_helper.h"
 #include "butil/atomicops.h"
+#include "butil/compiler_specific.h"  // BUTIL_USE_TSAN
 #include <bthread/rwlock.h>
 
 namespace {
 
 long start_time = butil::cpuwide_time_ms();
-int c = 0;
+butil::atomic<int> c(0);
 void* rdlocker(void* arg) {
     auto rw = (bthread_rwlock_t*)arg;
     bthread_rwlock_rdlock(rw);
@@ -207,8 +208,8 @@ TEST(RWLockTest, cpp_wrapper) {
     }
 }
 
-bool g_started = false;
-bool g_stopped = false;
+butil::atomic<bool> g_started(false);
+butil::atomic<bool> g_stopped(false);
 
 void read_op(bthread_rwlock_t* rw, int64_t sleep_us) {
     ASSERT_EQ(0, bthread_rwlock_rdlock(rw));
@@ -361,6 +362,9 @@ TEST(RWLockTest, writer_priority) {
     ASSERT_EQ(0, bthread_rwlock_destroy(&rw));
 }
 
+// The following test asserts on elapsed time, which is unreliable and very
+// slow under ThreadSanitizer, so it is disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 void* wp_timed_wrlock_short(void* arg) {
     auto* rw = (bthread_rwlock_t*)arg;
     timespec ts = butil::milliseconds_from_now(50);
@@ -405,6 +409,7 @@ TEST(RWLockTest, wrlock_failure_does_not_leak_writer_count) {
     ASSERT_EQ(0, bthread_rwlock_unlock(&rw));
     ASSERT_EQ(0, bthread_rwlock_destroy(&rw));
 }
+#endif // BUTIL_USE_TSAN
 
 struct DataConsistencyArgs {
     bthread_rwlock_t* rw;
@@ -485,6 +490,9 @@ TEST(RWLockTest, data_consistency) {
     ASSERT_EQ(0, bthread_rwlock_destroy(&rw));
 }
 
+// The following test asserts on elapsed time, which is unreliable and very
+// slow under ThreadSanitizer, so it is disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 void* ws_reader_loop(void* arg) {
     auto* rw = (bthread_rwlock_t*)arg;
     while (!g_stopped) {
@@ -533,12 +541,13 @@ TEST(RWLockTest, no_writer_starvation) {
     }
     ASSERT_EQ(0, bthread_rwlock_destroy(&rw));
 }
+#endif // BUTIL_USE_TSAN
 
 struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
     bthread_rwlock_t* rw;
     int64_t counter;
     int64_t elapse_ns;
-    bool ready;
+    butil::atomic<bool> ready;
 
     PerfArgs() : rw(NULL), counter(0), elapse_ns(0), ready(false) {}
 };
@@ -546,7 +555,7 @@ struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
 template <bool Reader>
 void* add_with_mutex(void* void_arg) {
     auto args = (PerfArgs*)void_arg;
-    args->ready = true;
+    args->ready.store(true, butil::memory_order_release);
     butil::Timer t;
     while (!g_stopped) {
         if (g_started) {
@@ -596,7 +605,7 @@ void PerfTest(uint32_t writer_ratio, ThreadId* /*dummy*/, int thread_num,
     while (true) {
         bool all_ready = true;
         for (int i = 0; i < thread_num; ++i) {
-            if (!args[i].ready) {
+            if (!args[i].ready.load(butil::memory_order_acquire)) {
                 all_ready = false;
                 break;
             }

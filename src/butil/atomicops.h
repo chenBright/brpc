@@ -139,7 +139,25 @@ Atomic64 Release_Load(volatile const Atomic64* ptr);
 }  // namespace butil
 
 // Include our platform specific implementation.
-#if defined(THREAD_SANITIZER)
+// NOTE: brpc's unified TSan switch is BUTIL_USE_TSAN (defined in
+// butil/compiler_specific.h, pulled in transitively via butil/macros.h above)
+// and is set automatically under -fsanitize=thread. The legacy Chromium macro
+// THREAD_SANITIZER is never defined by our build system, so we must also check
+// BUTIL_USE_TSAN here. Otherwise the build falls back to a barrier-based
+// implementation (e.g. atomicops_internals_x86_gcc.h) whose hand-written
+// acquire/release fences and bare *ptr loads/stores are invisible to TSan,
+// producing false data races on every subtle::Atomic* user -- most notably the
+// double-checked locking in Singleton<>::get().
+//
+// Under TSan we deliberately pick the __atomic-builtin implementation rather
+// than atomicops_internals_tsan.h: the latter relies on
+// <sanitizer/tsan_interface_atomic.h>, which only Clang/compiler-rt ships --
+// GCC's libsanitizer does not provide it. The __atomic builtins are
+// instrumented by both GCC and Clang under -fsanitize=thread, so the sanitizer
+// tracks the orderings correctly while keeping the build portable.
+#if defined(BUTIL_USE_TSAN)
+#include "butil/atomicops_internals_gcc_tsan.h"
+#elif defined(THREAD_SANITIZER)
 #include "butil/atomicops_internals_tsan.h"
 #elif defined(OS_WIN) && defined(COMPILER_MSVC) && defined(ARCH_CPU_X86_FAMILY)
 #include "butil/atomicops_internals_x86_msvc.h"

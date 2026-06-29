@@ -29,6 +29,7 @@
 
 #include "bthread/countdown_event.h"
 #include "butil/synchronization/lock.h"
+#include "butil/compiler_specific.h"  // BUTIL_USE_TSAN
 #include "brpc/channel.h"
 #include "brpc/redis.h"
 #include "brpc/redis_cluster.h"
@@ -98,9 +99,9 @@ int OwnerBySlot(int slot) {
 
 struct ClusterMeta {
     std::string endpoint[2];
-    bool fail_slots;
-    bool fail_nodes;
-    bool slots_empty_host;
+    std::atomic<bool> fail_slots;
+    std::atomic<bool> fail_nodes;
+    std::atomic<bool> slots_empty_host;
     std::atomic<int> slots_override_slot;
     std::atomic<int> slots_override_owner;
     std::atomic<bool> accept_requests_on_wrong_owner;
@@ -1574,6 +1575,9 @@ TEST_F(RedisClusterChannelTest, periodic_refresh_updates_topology_in_background)
     ASSERT_TRUE(refreshed);
 }
 
+// This test asserts on destructor latency, which is unreliable and very slow
+// under ThreadSanitizer, so it is disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 TEST_F(RedisClusterChannelTest, periodic_refresh_thread_stops_quickly_on_destroy) {
     typedef std::chrono::steady_clock Clock;
     const Clock::time_point begin = Clock::now();
@@ -1589,6 +1593,7 @@ TEST_F(RedisClusterChannelTest, periodic_refresh_thread_stops_quickly_on_destroy
         std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
     ASSERT_LT(elapsed_ms, 2000);
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(RedisClusterChannelTest, init_with_empty_seed_should_fail) {
     brpc::RedisClusterChannel channel;

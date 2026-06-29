@@ -1244,7 +1244,8 @@ inline std::ostream& operator<<(std::ostream& out, const std::wstring& wstr) {
 #define BAIDU_LOG_IF_EVERY_SECOND_IMPL(logifmacro, severity, condition) \
     static ::butil::subtle::Atomic64 BAIDU_CONCAT(logeverys_, __LINE__) = 0; \
     const int64_t BAIDU_CONCAT(logeverys_ts_, __LINE__) = ::butil::gettimeofday_us(); \
-    const int64_t BAIDU_CONCAT(logeverys_seen_, __LINE__) = BAIDU_CONCAT(logeverys_, __LINE__); \
+    const int64_t BAIDU_CONCAT(logeverys_seen_, __LINE__) =              \
+        ::butil::subtle::NoBarrier_Load(&BAIDU_CONCAT(logeverys_, __LINE__)); \
     logifmacro(severity, (condition) && BAIDU_CONCAT(logeverys_ts_, __LINE__) >= \
                (BAIDU_CONCAT(logeverys_seen_, __LINE__) + 1000000L) &&  \
                ::butil::subtle::NoBarrier_CompareAndSwap(                \

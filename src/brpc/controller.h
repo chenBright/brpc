@@ -30,6 +30,7 @@
 #include "bthread/errno.h"                     // Redefine errno
 #include "butil/endpoint.h"                    // butil::EndPoint
 #include "butil/iobuf.h"                       // butil::IOBuf
+#include "butil/atomicops.h"                   // butil::atomic
 #include "bthread/types.h"                     // bthread_id_t
 #include "brpc/options.pb.h"                   // CompressType
 #include "brpc/errno.pb.h"                     // error code
@@ -725,7 +726,7 @@ private:
     bool FailedInline() const { return _error_code; }
 
     CallId get_id(int nretry) const {
-        CallId id = { _correlation_id.value + nretry + 1 };
+        CallId id = { correlation_value() + nretry + 1 };
         return id;
     }
 
@@ -734,11 +735,21 @@ private:
 
 public:
     CallId current_id() const {
-        CallId id = { _correlation_id.value + _current_call.nretry + 1 };
+        CallId id = { correlation_value() + _current_call.nretry + 1 };
         return id;
     }
 private:
-    
+
+    // `_correlation_id.value' may be published by call_id() through an atomic
+    // CAS issued from another thread (e.g. a ParallelChannel sibling cancelling
+    // this sub call via bthread_id_error()). Read it atomically with acquire
+    // ordering to pair with that release store, avoiding a data race (reported
+    // by ThreadSanitizer) against concurrent call_id().
+    uint64_t correlation_value() const {
+        return reinterpret_cast<const butil::atomic<uint64_t>*>(
+                   &_correlation_id.value)->load(butil::memory_order_acquire);
+    }
+
     // Append server information to `_error_text'
     void AppendServerIdentiy();
 

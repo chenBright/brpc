@@ -63,12 +63,24 @@ inline void Socket::CheckEOF() {
 }
 
 inline void Socket::CheckEOFInternal() {
+    // NOTE: under ThreadSanitizer the standalone atomic_thread_fence(acquire)
+    // is not supported (triggers -Wtsan under GCC and cannot be modeled), so
+    // the acquire fence is folded into the RMW via acq_rel. Normal builds keep
+    // the cheaper "release RMW + acquire fence only on the last decrement".
+#if defined(BUTIL_USE_TSAN)
+    uint32_t nref = _ninprocess.fetch_sub(1, butil::memory_order_acq_rel);
+    if ((nref & ~EOF_FLAG) == 1) {
+        // It's safe to call `SetFailed' each time `_ninprocess' hits 0
+        SetFailed(EEOF, "Got EOF of %s", description().c_str());
+    }
+#else
     uint32_t nref = _ninprocess.fetch_sub(1, butil::memory_order_release);
     if ((nref & ~EOF_FLAG) == 1) {
         butil::atomic_thread_fence(butil::memory_order_acquire);
         // It's safe to call `SetFailed' each time `_ninprocess' hits 0
         SetFailed(EEOF, "Got EOF of %s", description().c_str());
     }
+#endif
 }
 
 inline void Socket::SetEOF() {

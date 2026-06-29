@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <atomic>
+
 #include "butil/compiler_specific.h"
 #include "butil/memory/scoped_ptr.h"
 #include "butil/synchronization/lock.h"
@@ -42,16 +44,19 @@ class AssertReporter : public butil::AsserterBase {
       : failed_(false) {}
 
   virtual void warn() OVERRIDE {
-    failed_ = true;
+    // The multi-threaded tests intentionally trigger this from several
+    // threads concurrently. Use atomic to avoid a benign data race on
+    // |failed_| that would otherwise be reported by ThreadSanitizer.
+    failed_.store(true, std::memory_order_relaxed);
   }
 
   virtual ~AssertReporter() {}
 
-  bool fail_state() const { return failed_; }
-  void reset() { failed_ = false; }
+  bool fail_state() const { return failed_.load(std::memory_order_relaxed); }
+  void reset() { failed_.store(false, std::memory_order_relaxed); }
 
  private:
-  bool failed_;
+  std::atomic<bool> failed_;
 };
 
 }  // namespace

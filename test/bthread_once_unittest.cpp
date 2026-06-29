@@ -27,7 +27,7 @@ extern TaskControl* g_task_control;
 namespace {
 
 bthread_once_t g_bthread_once_control;
-bool g_bthread_once_started = false;
+butil::atomic<bool> g_bthread_once_started(false);
 butil::atomic<int> g_bthread_once_count(0);
 
 void init_routine() {
@@ -42,7 +42,7 @@ void bthread_once_task() {
 }
 
 void* first_bthread_once_task(void*) {
-    g_bthread_once_started = true;
+    g_bthread_once_started.store(true, butil::memory_order_relaxed);
     bthread_once_task();
     return NULL;
 }
@@ -57,7 +57,7 @@ TEST(BthreadOnceTest, once) {
     bthread_t bid;
     ASSERT_EQ(0, bthread_start_background(
         &bid, NULL, first_bthread_once_task, NULL));
-    while (!g_bthread_once_started) {
+    while (!g_bthread_once_started.load(butil::memory_order_relaxed)) {
         bthread_usleep(1000);
     }
     ASSERT_NE(nullptr, bthread::g_task_control);
@@ -77,7 +77,7 @@ TEST(BthreadOnceTest, once) {
     bthread_join(bid, NULL);
 }
 
-bool g_bthread_started = false;
+butil::atomic<bool> g_bthread_started(false);
 butil::atomic<int> g_bthread_singleton_count(0);
 
 class BthreadSingleton {
@@ -96,7 +96,7 @@ void get_bthread_singleton() {
 }
 
 void* first_get_bthread_singleton(void*) {
-    g_bthread_started = true;
+    g_bthread_started.store(true, butil::memory_order_relaxed);
     get_bthread_singleton();
     return NULL;
 }
@@ -113,7 +113,7 @@ TEST(BthreadOnceTest, singleton) {
     bthread_t bid;
     ASSERT_EQ(0, bthread_start_background(
         &bid, NULL, first_get_bthread_singleton, NULL));
-    while (!g_bthread_started) {
+    while (!g_bthread_started.load(butil::memory_order_relaxed)) {
         bthread_usleep(1000);
     }
     ASSERT_NE(nullptr, bthread::g_task_control);

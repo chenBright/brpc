@@ -91,7 +91,7 @@ struct BAIDU_CACHELINE_ALIGNMENT TaskNode {
     bool iterated;
     bool high_priority;
     bool in_place;
-    TaskNode* next;
+    butil::atomic<TaskNode*> next;
     ExecutionQueueBase* q;
     union {
         char static_task_mem[56];  // Make sizeof TaskNode exactly 128 bytes
@@ -196,6 +196,11 @@ protected:
     void start_execute(TaskNode* node);
     TaskNode* allocate_node();
     void return_task_node(TaskNode* node);
+    // Same as above but uses an explicitly supplied clear_func instead of
+    // reading the member _clear_func. Used by executors that have already
+    // relinquished ownership of the queue (so touching `this` would race with
+    // the slot being recycled and reused by create()).
+    static void return_task_node(TaskNode* node, clear_task_mem clear_func);
 
 private:
 
@@ -484,7 +489,7 @@ inline bool ExecutionQueueBase::_more_tasks(
         TaskNode* old_head, TaskNode** new_tail, 
         bool has_uniterated) {
 
-    CHECK(old_head->next == NULL);
+    CHECK(old_head->next.load(butil::memory_order_relaxed) == NULL);
     // Try to set _head to NULL to mark that the execute is done.
     TaskNode* new_head = old_head;
     TaskNode* desired = NULL;
@@ -493,14 +498,21 @@ inline bool ExecutionQueueBase::_more_tasks(
         desired = old_head;
         return_when_no_more = true;
     }
+    // acq_rel:
+    // - The acquire pairs with the release of exchange() in start_execute()
+    //   (a.k.a. Write()) so that we see all fields of newly added requests.
+    // - The release publishes this executor's memory effects (e.g. writes done
+    //   by the tasks it just executed) onto _head. When this executor finishes
+    //   and sets _head to NULL here, a later start_execute() that picks the slot
+    //   up via an acquiring exchange() will carry those effects across executor
+    //   bthreads, all the way to execution_queue_join().
     if (_head.compare_exchange_strong(
-                new_head, desired, butil::memory_order_acquire)) {
+                new_head, desired, butil::memory_order_acq_rel,
+                butil::memory_order_acquire)) {
         // No one added new tasks.
         return return_when_no_more;
     }
     CHECK_NE(new_head, old_head);
-    // Above acquire fence pairs release fence of exchange in Write() to make
-    // sure that we see all fields of requests set.
 
     // Someone added new requests.
     // Reverse the list until old_head.
@@ -510,19 +522,22 @@ inline bool ExecutionQueueBase::_more_tasks(
     }
     TaskNode* p = new_head;
     do {
-        while (p->next == TaskNode::UNCONNECTED) {
+        // The acquire load pairs with the release store of `next' in
+        // start_execute() so that we observe all fields of the node set by
+        // the producer before it linked the node into the queue.
+        while (p->next.load(butil::memory_order_acquire) == TaskNode::UNCONNECTED) {
             // TODO(gejun): elaborate this
             sched_yield();
         }
-        TaskNode* const saved_next = p->next;
-        p->next = tail;
+        TaskNode* const saved_next = p->next.load(butil::memory_order_relaxed);
+        p->next.store(tail, butil::memory_order_relaxed);
         tail = p;
         p = saved_next;
         CHECK(p != NULL);
     } while (p != old_head);
 
     // Link old list with new list.
-    old_head->next = tail;
+    old_head->next.store(tail, butil::memory_order_relaxed);
     return true;
 }
 

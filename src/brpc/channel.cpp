@@ -460,12 +460,6 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
         // in correlation_id. negative max_retry causes undefined behavior.
         cntl->set_max_retry(0);
     }
-    // HTTP needs this field to be set before any SetFailed()
-    cntl->_request_protocol = _options.protocol;
-    if (_options.protocol.has_param()) {
-        CHECK(cntl->protocol_param().empty());
-        cntl->protocol_param() = _options.protocol.param();
-    }
     if (_options.protocol == brpc::PROTOCOL_HTTP && (_scheme == "https" || _scheme == "http")) {
         URI& uri = cntl->http_request().uri();
         if (uri.host().empty() && !_service_name.empty()) {
@@ -480,6 +474,18 @@ void Channel::CallMethod(const google::protobuf::MethodDescriptor* method,
     const CallId correlation_id = cntl->call_id();
     const int rc = bthread_id_lock_and_reset_range(
                     correlation_id, NULL, 2 + cntl->max_retry());
+    // HTTP needs this field to be set before any SetFailed(). Set it only after
+    // the call_id has been locked above (the lock-failure path below is a misuse
+    // case with no concurrent cancel). For a ParallelChannel sub call, a sibling
+    // may cancel this one via bthread_id_error() from another thread before this
+    // CallMethod() runs; writing _request_protocol while the call_id is locked
+    // serializes it with that cancel path (which reads request_protocol() inside
+    // SetFailed()->UpdateResponseHeader()) through Id::mutex, avoiding a data race.
+    cntl->_request_protocol = _options.protocol;
+    if (_options.protocol.has_param()) {
+        CHECK(cntl->protocol_param().empty());
+        cntl->protocol_param() = _options.protocol.param();
+    }
     if (rc != 0) {
         CHECK_EQ(EINVAL, rc);
         if (!cntl->FailedInline()) {

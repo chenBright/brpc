@@ -54,13 +54,14 @@ else
     LDD=ldd
 fi
 
-TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,with-bthread-tracer,with-debug-bthread-sche-safety,with-debug-lock,with-asan,nodebugsymbols,werror -n 'config_brpc' -- "$@"`
+TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-rdma,with-mesalink,with-bthread-tracer,with-debug-bthread-sche-safety,with-debug-lock,with-asan,with-tsan,nodebugsymbols,werror -n 'config_brpc' -- "$@"`
 WITH_GLOG=0
 WITH_THRIFT=0
 WITH_RDMA=0
 WITH_MESALINK=0
 WITH_BTHREAD_TRACER=0
 WITH_ASAN=0
+WITH_TSAN=0
 BRPC_DEBUG_BTHREAD_SCHE_SAFETY=0
 DEBUGSYMBOLS=-g
 WERROR=
@@ -92,6 +93,7 @@ while true; do
         --with-debug-bthread-sche-safety ) BRPC_DEBUG_BTHREAD_SCHE_SAFETY=1; shift 1 ;;
         --with-debug-lock ) BRPC_DEBUG_LOCK=1; shift 1 ;;
         --with-asan) WITH_ASAN=1; shift 1 ;;
+        --with-tsan) WITH_TSAN=1; shift 1 ;;
         --nodebugsymbols ) DEBUGSYMBOLS=; shift 1 ;;
         --werror ) WERROR=-Werror; shift 1 ;;
         -- ) shift; break ;;
@@ -385,9 +387,19 @@ fi
 
 CPPFLAGS=
 
+if [ $WITH_ASAN != 0 ] && [ $WITH_TSAN != 0 ]; then
+  >&2 $ECHO "--with-asan and --with-tsan can not be enabled at the same time"
+  exit 1
+fi
+
 if [ $WITH_ASAN != 0 ]; then
   CPPFLAGS="${CPPFLAGS} -fsanitize=address"
   DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -fsanitize=address"
+fi
+
+if [ $WITH_TSAN != 0 ]; then
+  CPPFLAGS="${CPPFLAGS} -fsanitize=thread"
+  DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -fsanitize=thread"
 fi
 
 LEVELDB_HDR=$(find_dir_of_header_or_die leveldb/db.h)
@@ -575,6 +587,8 @@ if [ -z "$TCMALLOC_LIB" ]; then
     append_to_output "    \$(error \"Fail to find gperftools\")"
 elif [ $WITH_ASAN != 0 ]; then
     append_to_output "    \$(error \"gperftools is not compatible with ASAN\")"
+elif [ $WITH_TSAN != 0 ]; then
+    append_to_output "    \$(error \"gperftools is not compatible with TSAN\")"
 else
     append_to_output "    CPPFLAGS+=-DBRPC_ENABLE_CPU_PROFILER"
     append_to_output_libs "$TCMALLOC_LIB" "    "
@@ -655,4 +669,5 @@ if [ $WITH_RDMA -ne 0 ]; then print_info "With RDMA: yes"; fi
 if [ $WITH_MESALINK -ne 0 ]; then print_info "With MesaLink: yes"; fi
 if [ $WITH_BTHREAD_TRACER -ne 0 ]; then print_info "With bthread tracer: yes"; fi
 if [ $WITH_ASAN -ne 0 ]; then print_info "With ASAN: yes"; fi
+if [ $WITH_TSAN -ne 0 ]; then print_info "With TSAN: yes"; fi
 printf "\n${GREEN}brpc is now configured. You can build it with 'make'.${NC}\n"

@@ -52,8 +52,11 @@ struct BAIDU_CACHELINE_ALIGNMENT PlayerArg {
     int write_fd;
     int* wait_addr;
     int* wake_addr;
-    long counter;
-    long wakeup;
+    // These counters are written by player threads (which are never joined
+    // and keep running until process exit) and concurrently read by the main
+    // thread. Use atomics to avoid data races reported by ThreadSanitizer.
+    butil::atomic<long> counter;
+    butil::atomic<long> wakeup;
 };
 
 void* pipe_player(void* void_arg) {
@@ -76,7 +79,7 @@ void* pipe_player(void* void_arg) {
             printf("[%" PRIu64 "] bad write, %m\n", pthread_numeric_id());
             break;
         }
-        ++arg->counter;
+        arg->counter.fetch_add(1, butil::memory_order_relaxed);
     }
     return NULL;
 }
@@ -91,8 +94,8 @@ void* futex_player(void* void_arg) {
         ++counter;
         ++*arg->wake_addr;
         bthread::futex_wake_private(arg->wake_addr, 1);
-        ++arg->counter;
-        arg->wakeup += (rc == 0);
+        arg->counter.fetch_add(1, butil::memory_order_relaxed);
+        arg->wakeup.fetch_add(rc == 0, butil::memory_order_relaxed);
     }
     return NULL;
 }
@@ -105,8 +108,8 @@ void* butex_player(void* void_arg) {
         ++counter;
         ++*arg->wake_addr;
         bthread::butex_wake(arg->wake_addr);
-        ++arg->counter;
-        arg->wakeup += (rc == 0);
+        arg->counter.fetch_add(1, butil::memory_order_relaxed);
+        arg->wakeup.fetch_add(rc == 0, butil::memory_order_relaxed);
     }
     return NULL;
 }
@@ -198,8 +201,8 @@ TEST(PingPongTest, ping_pong) {
         long cur_counter = 0;
         long cur_wakeup = 0;
         for (int i = 0; i < FLAGS_thread_num; ++i) {
-            cur_counter += args[i]->counter;
-            cur_wakeup += args[i]->wakeup;
+            cur_counter += args[i]->counter.load(butil::memory_order_relaxed);
+            cur_wakeup += args[i]->wakeup.load(butil::memory_order_relaxed);
         }
         if (FLAGS_use_futex || FLAGS_use_butex) {
             printf("pingpong-ed %" PRId64 "/s, wakeup=%" PRId64 "/s\n",

@@ -21,6 +21,7 @@
 
 #include "butil/time.h"
 #include "butil/macros.h"
+#include "butil/atomicops.h"
 #include "butil/string_printf.h"
 #include "butil/string_splitter.h"
 
@@ -279,7 +280,7 @@ TEST_F(ReducerTest, non_primitive) {
     ASSERT_EQ(9, adder.get_value().x);
 }
 
-bool g_stop = false;
+butil::atomic<bool> g_stop(false);
 struct StringAppenderResult {
     int count;
 };

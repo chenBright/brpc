@@ -237,13 +237,14 @@ public:
         // and EPOLL_CTL_ADD shall have release fence.
         const int expected_val = butex->load(butil::memory_order_relaxed);
 
+        const int epfd = _epfd.load(butil::memory_order_relaxed);
 #if defined(OS_LINUX)
 # ifdef BAIDU_KERNEL_FIXED_EPOLLONESHOT_BUG
         epoll_event evt = { events | EPOLLONESHOT, { butex } };
-        if (epoll_ctl(_epfd, EPOLL_CTL_MOD, fd, &evt) < 0) {
-            if (epoll_ctl(_epfd, EPOLL_CTL_ADD, fd, &evt) < 0 &&
+        if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &evt) < 0) {
+            if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &evt) < 0 &&
                     errno != EEXIST) {
-                PLOG(FATAL) << "Fail to add fd=" << fd << " into epfd=" << _epfd;
+                PLOG(FATAL) << "Fail to add fd=" << fd << " into epfd=" << epfd;
                 return -1;
             }
         }
@@ -251,9 +252,9 @@ public:
         epoll_event evt;
         evt.events = events;
         evt.data.fd = fd;
-        if (epoll_ctl(_epfd, EPOLL_CTL_ADD, fd, &evt) < 0 &&
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &evt) < 0 &&
             errno != EEXIST) {
-            PLOG(FATAL) << "Fail to add fd=" << fd << " into epfd=" << _epfd;
+            PLOG(FATAL) << "Fail to add fd=" << fd << " into epfd=" << epfd;
             return -1;
         }
 # endif
@@ -261,8 +262,8 @@ public:
         struct kevent kqueue_event;
         EV_SET(&kqueue_event, fd, events, EV_ADD | EV_ENABLE | EV_ONESHOT,
                 0, 0, butex);
-        if (kevent(_epfd, &kqueue_event, 1, NULL, 0, NULL) < 0) {
-            PLOG(FATAL) << "Fail to add fd=" << fd << " into kqueuefd=" << _epfd;
+        if (kevent(epfd, &kqueue_event, 1, NULL, 0, NULL) < 0) {
+            PLOG(FATAL) << "Fail to add fd=" << fd << " into kqueuefd=" << epfd;
             return -1;
         }
 #endif
@@ -399,8 +400,12 @@ private:
         return NULL;
     }
 
-    int _epfd;
-    bool _stop;
+    // Accessed by double-checked locking in start() (lock-free read in
+    // started() racing with the locked write here) and by multiple threads in
+    // fd_wait()/run()/stop_and_join(). Must be atomic to avoid data races.
+    butil::atomic<int> _epfd;
+    // Written by stop_and_join() while run() keeps reading it.
+    butil::atomic<bool> _stop;
     bthread_t _tid;
     butil::Mutex _start_mutex;
 };

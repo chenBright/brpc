@@ -60,8 +60,7 @@ void BthreadsService::default_method(::google::protobuf::RpcController* cntl_bas
         bthread_t tid = strtoull(constraint.c_str(), &endptr, 10);
         if (*endptr == '\0' || *endptr == '/' || *endptr == '?') {
             ::bthread::print_task(os, tid, enable_trace);
-        }
-        else if (constraint != "all" && constraint != "all?st=1") {
+        } else if (constraint != "all" && constraint != "all?st=1") {
             cntl->SetFailed(ENOMETHOD, "path=%s is not a bthread id or all, or all?st=1\n",
                             constraint.c_str());
         } else {

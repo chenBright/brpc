@@ -17,7 +17,15 @@
 
 # turn on coredumps
 ulimit -c unlimited
-rm core.*
+# In many CI containers the kernel core_pattern pipes cores to an external
+# handler (apport/systemd-coredump) instead of writing them to CWD, so no
+# "core.*" file ever appears here. Try to redirect cores to the current
+# directory; this is best-effort because /proc/sys/kernel/core_pattern is
+# usually read-only inside containers.
+if [ -w /proc/sys/kernel/core_pattern ]; then
+    echo "core.%e.%p" > /proc/sys/kernel/core_pattern 2>/dev/null || true
+fi
+rm -f core.*
 
 test_num=0
 failed_test=""
@@ -43,11 +51,29 @@ if [ $test_num -eq 0 ]; then
 fi
 
 print_bt () {
+    local prog="$1"
     # find newest core file
-    COREFILE=$(find . -name "core*" -type f -printf "%T@ %p\n" | sort -k 1 -n | cut -d' ' -f 2- | tail -n 1)
+    COREFILE=$(find . -name "core*" -type f -printf "%T@ %p\n" 2>/dev/null | sort -k 1 -n | cut -d' ' -f 2- | tail -n 1)
     if [ ! -z "$COREFILE" ]; then
-        >&2 echo "corefile=$COREFILE prog=$1"
-        gdb -c "$COREFILE" $1 -ex "bt" -ex "thread apply all bt" -ex "set pagination 0" -batch;
+        >&2 echo "corefile=$COREFILE prog=$prog"
+        gdb -c "$COREFILE" "$prog" -ex "bt" -ex "thread apply all bt" -ex "set pagination 0" -batch;
+        return
+    fi
+
+    # No core file. This is the common case in CI containers (core_pattern
+    # pipes cores away) and for sanitizer builds (disable_coredump=1 by
+    # default), so the crash site would otherwise be lost. Fall back to
+    # re-running the failed test under gdb to capture the backtrace directly,
+    # without needing a core dump.
+    >&2 echo "[runtest] no core file found (core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null))"
+    if [ "$rc" -gt 128 ] && command -v gdb >/dev/null 2>&1; then
+        >&2 echo "[runtest] '$prog' was killed by signal $((rc - 128)); re-running under gdb to capture backtrace"
+        gdb "./$prog" -batch \
+            -ex "set pagination 0" \
+            -ex "handle SIGSEGV stop print" \
+            -ex "run" \
+            -ex "bt" \
+            -ex "thread apply all bt"
     fi
 }
 

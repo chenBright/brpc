@@ -21,6 +21,7 @@
 #define BVAR_COLLECTOR_H
 
 #include "butil/containers/linked_list.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "butil/fast_rand.h"
 #include "butil/time.h"
 #include "butil/atomicops.h"
@@ -117,6 +118,12 @@ public:
 // by collecting thread to control the samples collected per second.
 // This function should cost less than 10ns in most cases.
 inline size_t is_collectable(CollectorSpeedLimit* speed_limit) {
+    // CollectorSpeedLimit is adjusted periodically by Collector::grab_thread()
+    // and read lock-free on hot RPC paths. The values only control best-effort
+    // sampling probability, so races on them are benign.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        speed_limit, sizeof(*speed_limit),
+        "CollectorSpeedLimit is read lock-free for best-effort sampling");
     if (speed_limit->ever_grabbed) { // most common case
         const size_t sampling_range = speed_limit->sampling_range;
         // fast_rand is faster than fast_rand_in

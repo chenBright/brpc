@@ -28,6 +28,7 @@
 #include "gperftools_helper.h"
 #include "butil/time.h"
 #include "butil/macros.h"
+#include "butil/atomicops.h"
 #include "brpc/socket.h"
 #include "brpc/server.h"
 #include "brpc/channel.h"
@@ -851,11 +852,11 @@ void* dummy_bthread(void*) {
 
 
 #ifdef BRPC_BTHREAD_TRACER
-bool g_bthread_trace_start = false;
-bool g_bthread_trace_stop = false;
+butil::atomic<bool> g_bthread_trace_start(false);
+butil::atomic<bool> g_bthread_trace_stop(false);
 void* bthread_trace(void*) {
-    g_bthread_trace_start = true;
-    while (!g_bthread_trace_stop) {
+    g_bthread_trace_start.store(true, butil::memory_order_release);
+    while (!g_bthread_trace_stop.load(butil::memory_order_acquire)) {
         bthread_usleep(1000 * 100);
     }
     return NULL;
@@ -935,7 +936,7 @@ TEST_F(BuiltinServiceTest, bthreads) {
     for (int i = 0; i < 10; ++i) {
         bthread_t th;
         EXPECT_EQ(0, bthread_start_background(&th, NULL, bthread_trace, NULL));
-        while (!g_bthread_trace_start) {
+        while (!g_bthread_trace_start.load(butil::memory_order_acquire)) {
             bthread_usleep(1000 * 10);
         }
         LOG(INFO) << "start bthread = " << th;
@@ -951,7 +952,7 @@ TEST_F(BuiltinServiceTest, bthreads) {
         ok = content.find("stop=0") != std::string::npos &&
              content.find("bthread_trace") != std::string::npos;
         check_all_ok = check_all_bthreads(th, true) && check_all_bthreads(th, false);
-        g_bthread_trace_stop = true;
+        g_bthread_trace_stop.store(true, butil::memory_order_release);
         bthread_join(th, NULL);
         // the `bthread_trace` bthread should not be queried now
         EXPECT_TRUE(!check_all_bthreads(th, true) && !check_all_bthreads(th, false));

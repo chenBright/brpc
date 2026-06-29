@@ -39,8 +39,8 @@ namespace {
 // simply don't use this specific key anymore.
 #define KEY_USABLE(p) (((size_t) (p)) < ((size_t) ((p) + 2)))
 
-bool g_started = false;
-bool g_stopped = false;
+butil::atomic<bool> g_started{false};
+butil::atomic<bool> g_stopped{false};
 
 struct ThreadKeyInfo {
     uint32_t id;
@@ -123,7 +123,6 @@ void* THreadKeyCreateAndDeleteFunc(void*) {
 }
 
 TEST(ThreadLocalTest, thread_key_create_and_delete) {
-    LOG(INFO) << "numeric_limits<uint32_t>::max()=" << std::numeric_limits<uint32_t>::max();
     g_stopped = false;
     const int thread_num = 8;
     pthread_t threads[thread_num];
@@ -223,10 +222,10 @@ TEST(ThreadLocalTest, thread_local_for_each) {
 
 struct BAIDU_CACHELINE_ALIGNMENT ThreadKeyArg {
     std::vector<ThreadKey*> thread_keys;
-    bool ready_delete = false;
+    butil::atomic<bool> ready_delete{false};
 };
 
-bool g_deleted = false;
+butil::atomic<bool> g_deleted{false};
 void* ThreadKeyFunc(void* arg) {
     auto thread_key_arg = (ThreadKeyArg*)arg;
     auto thread_keys = thread_key_arg->thread_keys;
@@ -322,7 +321,7 @@ struct BAIDU_CACHELINE_ALIGNMENT ThreadKeyPerfArgs {
     bool is_pthread_key;
     int64_t counter;
     int64_t elapse_ns;
-    bool ready;
+    butil::atomic<bool> ready;
 
     ThreadKeyPerfArgs()
         : thread_key(NULL)
@@ -424,7 +423,7 @@ struct BAIDU_CACHELINE_ALIGNMENT ThreadLocalPerfArgs {
     ThreadLocal<int>* tl;
     int64_t counter;
     int64_t elapse_ns;
-    bool ready;
+    butil::atomic<bool> ready;
 
     ThreadLocalPerfArgs()
         : tl(NULL) , counter(0)

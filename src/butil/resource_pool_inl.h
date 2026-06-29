@@ -30,6 +30,7 @@
 #include "butil/scoped_lock.h"           // BAIDU_SCOPED_LOCK
 #include "butil/thread_local.h"          // thread_atexit
 #include "butil/memory/aligned_memory.h" // butil::AlignedMemory
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include <vector>
 
 #ifdef BUTIL_RESOURCE_POOL_NEED_FREE_ITEM_NUM
@@ -170,7 +171,12 @@ public:
             const ResourceId<T> free_id = _cur_free.ids[--_cur_free.nfree]; \
             *id = free_id;                                                  \
             BAIDU_RESOURCE_POOL_FREE_ITEM_NUM_SUB1;                         \
-            return unsafe_address_resource(free_id);                        \
+            T* reused = unsafe_address_resource(free_id);                   \
+            /* Acquire the happens-before published by return_resource() so  \
+               that reusing this object's memory across fibers/threads is    \
+               visible to TSan (see return_resource()). */                   \
+            BUTIL_TSAN_ACQUIRE(reused);                                     \
+            return reused;                                                  \
         }                                                                   \
         /* Fetch a FreeChunk from global.                                   \
            TODO: Popping from _free needs to copy a FreeChunk which is      \
@@ -180,7 +186,9 @@ public:
             const ResourceId<T> free_id =  _cur_free.ids[_cur_free.nfree];  \
             *id = free_id;                                                  \
             BAIDU_RESOURCE_POOL_FREE_ITEM_NUM_SUB1;                         \
-            return unsafe_address_resource(free_id);                        \
+            T* reused = unsafe_address_resource(free_id);                   \
+            BUTIL_TSAN_ACQUIRE(reused);                                     \
+            return reused;                                                  \
         }                                                                   \
         T* p = NULL;                                                        \
         /* Fetch memory from local block */                                 \
@@ -223,6 +231,15 @@ public:
 #undef BAIDU_RESOURCE_POOL_GET
 
         inline int return_resource(ResourceId<T> id) {
+            // Publish a happens-before edge picked up by the matching
+            // BUTIL_TSAN_ACQUIRE() in get() when this id is handed out again.
+            // The pool guarantees an id is reused only after being returned
+            // here, so reusing the resource object's memory (e.g. overwriting
+            // its fields in the next owner's ctor) genuinely happens-after the
+            // previous owner's last access. Without this, reuse across bthread
+            // fibers via the lock-free local free list carries no synchronization
+            // that TSan can observe, leading to false data-race reports.
+            BUTIL_TSAN_RELEASE(unsafe_address_resource(id));
             // Return to local free list
             if (_cur_free.nfree < ResourcePool::free_chunk_nitem()) {
                 _cur_free.ids[_cur_free.nfree++] = id;
@@ -381,6 +398,16 @@ private:
     ResourcePool() {
         _free_chunks.reserve(RP_INITIAL_FREE_LIST_SIZE);
         pthread_mutex_init(&_free_chunks_mutex, NULL);
+        // pop_free_chunk() peeks _free_chunks.empty() locklessly as a fast path
+        // before taking _free_chunks_mutex, while push_free_chunk() mutates the
+        // vector under the lock. The lockless reader only decides whether it is
+        // worth locking and re-checks emptiness after acquiring the lock, so a
+        // stale read is always corrected and never dereferences freed memory.
+        // Mark the vector's control block benign so TSan stops flagging this
+        // intentional lock-free fast path.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &_free_chunks, sizeof(_free_chunks),
+            "benign lock-free ResourcePool free chunk emptiness check");
     }
 
     ~ResourcePool() {
@@ -393,6 +420,16 @@ private:
         if (NULL == new_block) {
             return NULL;
         }
+        // address_resource() reads new_block->nitem locklessly as a bounds
+        // check ("offset < b->nitem"), while the block's owning thread mutates
+        // it without a lock ("++_cur_block->nitem" in LocalPool::get()). nitem
+        // only grows and the lockless reader merely validates an already
+        // published slot whose memory never moves, so reading a slightly stale
+        // or fresh value is always safe. Mark it benign so TSan stops flagging
+        // this intentional lock-free fast path.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &new_block->nitem, sizeof(new_block->nitem),
+            "benign lock-free ResourcePool block nitem bounds check");
 
         size_t ngroup;
         do {

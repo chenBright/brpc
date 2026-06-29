@@ -213,6 +213,15 @@ public:
     }
     
     void OnSubDoneRun(SubDone* fin) {
+        // Under ThreadSanitizer the standalone atomic_thread_fence(acquire)
+        // further below is unsupported (triggers -Wtsan under GCC); fold the
+        // acquire fence into the two release RMWs on `_current_done' by using
+        // acq_rel so the synchronization is carried by the atomic itself.
+#if defined(BUTIL_USE_TSAN)
+        const butil::memory_order done_order = butil::memory_order_acq_rel;
+#else
+        const butil::memory_order done_order = butil::memory_order_release;
+#endif
         if (fin != NULL) {
             // [ called from SubDone::Run() ]
 
@@ -246,7 +255,7 @@ public:
             // The release fence is matched with acquire fence below to
             // guarantee visibilities of all other variables.
             const uint32_t val =
-                _current_done.fetch_add(1, butil::memory_order_release);
+                _current_done.fetch_add(1, done_order);
             // Lower 31 bits are number of finished sub calls. If caller is not
             // the last call that finishes, return.
             if ((val & 0x7fffffff) + 1 != saved_ndone) {
@@ -279,13 +288,15 @@ public:
             // Modify MSB to mark that this->Run() run.
             // The release fence is matched with acquire fence below to
             // guarantee visibilities of all other variables.
-            val = _current_done.fetch_or(0x80000000, butil::memory_order_release);
+            val = _current_done.fetch_or(0x80000000, done_order);
             // If not all sub calls finish, return.
             if ((val & 0x7fffffff) != (uint32_t)saved_ndone) {
                 return;
             }
         }
+#if !defined(BUTIL_USE_TSAN)
         butil::atomic_thread_fence(butil::memory_order_acquire);
+#endif
 
         if (fin != NULL &&
             !_cntl->is_done_allowed_to_run_in_place() &&

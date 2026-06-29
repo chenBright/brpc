@@ -360,7 +360,7 @@ struct HandlerControl {
     HandlerControl()
         : block(false)
     {}
-    bool block;
+    std::atomic<bool> block;
 };
 
 class OrderedInputHandler : public brpc::StreamInputHandler {
@@ -410,10 +410,10 @@ public:
     bool stopped() const { return _stopped; }
     int idle_times() const { return _idle_times; }
 private:
-    int _expected_next_value;
-    bool _failed;
-    bool _stopped;
-    int _idle_times;
+    std::atomic<int> _expected_next_value;
+    std::atomic<bool> _failed;
+    std::atomic<bool> _stopped;
+    std::atomic<int> _idle_times;
     HandlerControl* _cntl;
 };
 
@@ -452,13 +452,20 @@ TEST_F(StreamingRpcTest, received_in_order) {
     }
     ASSERT_FALSE(handler.failed());
     ASSERT_EQ(0, handler.idle_times());
-    ASSERT_EQ(N, handler._expected_next_value);
+    ASSERT_EQ(N, handler._expected_next_value.load());
 }
 
+// Shared between the on_writable callback (runs on a stream bthread) and the
+// test's main thread. Use atomics to avoid data races reported by TSan.
+struct WritableState {
+    std::atomic<bool> done{false};
+    std::atomic<int> error_code{0};
+};
+
 void on_writable(brpc::StreamId, void* arg, int error_code) {
-    std::pair<bool, int>* p = (std::pair<bool, int>*)arg;
-    p->first = true;
-    p->second = error_code;
+    WritableState* p = (WritableState*)arg;
+    p->error_code.store(error_code, std::memory_order_relaxed);
+    p->done.store(true, std::memory_order_release);
     LOG(INFO) << "error_code=" << error_code;
 }
 
@@ -516,13 +523,13 @@ TEST_F(StreamingRpcTest, block) {
     out.append(&dummy, sizeof(dummy));
     ASSERT_EQ(EAGAIN, brpc::StreamWrite(request_stream, out));
     hc.block = false;
-    std::pair<bool, int> p = std::make_pair(false, 0);
+    WritableState p;
     usleep(10);
     brpc::StreamWait(request_stream, NULL, on_writable, &p);
-    while (!p.first) {
+    while (!p.done.load(std::memory_order_acquire)) {
         usleep(100);
     }
-    ASSERT_EQ(0, p.second);
+    ASSERT_EQ(0, p.error_code.load(std::memory_order_relaxed));
 
     // wait flushing all the pending messages
     while (handler._expected_next_value != N + N) {
@@ -542,14 +549,14 @@ TEST_F(StreamingRpcTest, block) {
     out.append(&dummy, sizeof(dummy));
     ASSERT_EQ(EAGAIN, brpc::StreamWrite(request_stream, out));
     timespec duetime = butil::microseconds_from_now(1);
-    p.first = false;
+    p.done.store(false, std::memory_order_relaxed);
     LOG(INFO) << "Start wait";
     brpc::StreamWait(request_stream, &duetime, on_writable, &p);
-    while (!p.first) {
+    while (!p.done.load(std::memory_order_acquire)) {
         usleep(100);
     }
-    ASSERT_TRUE(p.first);
-    EXPECT_EQ(ETIMEDOUT, p.second);
+    ASSERT_TRUE(p.done.load(std::memory_order_acquire));
+    EXPECT_EQ(ETIMEDOUT, p.error_code.load(std::memory_order_relaxed));
     hc.block = false;
     ASSERT_EQ(0, brpc::StreamClose(request_stream));
     while (!handler.stopped()) {
@@ -558,7 +565,7 @@ TEST_F(StreamingRpcTest, block) {
 
     ASSERT_FALSE(handler.failed());
     ASSERT_EQ(0, handler.idle_times());
-    ASSERT_EQ(N + N + N, handler._expected_next_value);
+    ASSERT_EQ(N + N + N, handler._expected_next_value.load());
 }
 
 TEST_F(StreamingRpcTest, auto_close_if_host_socket_closed) {
@@ -602,7 +609,7 @@ TEST_F(StreamingRpcTest, auto_close_if_host_socket_closed) {
     }
     ASSERT_TRUE(handler.failed());
     ASSERT_EQ(0, handler.idle_times());
-    ASSERT_EQ(0, handler._expected_next_value);
+    ASSERT_EQ(0, handler._expected_next_value.load());
 }
 
 TEST_F(StreamingRpcTest, failed_when_rst) {
@@ -652,7 +659,7 @@ TEST_F(StreamingRpcTest, failed_when_rst) {
     }
     ASSERT_TRUE(handler.failed());
     ASSERT_EQ(0, handler.idle_times());
-    ASSERT_EQ(N, handler._expected_next_value);
+    ASSERT_EQ(N, handler._expected_next_value.load());
 }
 
 TEST_F(StreamingRpcTest, idle_timeout) {
@@ -687,7 +694,7 @@ TEST_F(StreamingRpcTest, idle_timeout) {
     ASSERT_FALSE(handler.failed());
 //    ASSERT_TRUE(handler.idle_times() >= 4 && handler.idle_times() <= 6)
 //               << handler.idle_times();
-    ASSERT_EQ(0, handler._expected_next_value);
+    ASSERT_EQ(0, handler._expected_next_value.load());
 }
 
 class PingPongHandler : public brpc::StreamInputHandler {
@@ -740,11 +747,11 @@ public:
     bool stopped() const { return _stopped; }
     int idle_times() const { return _idle_times; }
 private:
-    int _expected_next_value{0};
-    bool _error{false};
-    bool _failed{false};
-    bool _stopped{false};
-    int _idle_times{0};
+    std::atomic<int> _expected_next_value{0};
+    std::atomic<bool> _error{false};
+    std::atomic<bool> _failed{false};
+    std::atomic<bool> _stopped{false};
+    std::atomic<int> _idle_times{0};
 };
 
 TEST_F(StreamingRpcTest, ping_pong) {
@@ -818,6 +825,13 @@ TEST_F(StreamingRpcTest, server_send_data_before_run_done) {
     request_stream_options.handler = &handler;
     brpc::StreamId request_stream;
     brpc::Controller cntl;
+#ifdef BUTIL_USE_TSAN
+    // The server writes N messages before finishing the RPC (see
+    // SendNAfterAcceptStream), which is far slower under ThreadSanitizer.
+    // Give the call enough time so the RPC is not failed by a spurious timeout
+    // before the server-side stream is fully flushed.
+    cntl.set_timeout_ms(30000);
+#endif
     ASSERT_EQ(0, StreamCreate(&request_stream, cntl, &request_stream_options));
     brpc::ScopedStream stream_guard(request_stream);
     test::EchoService_Stub stub(&channel);
@@ -885,6 +899,6 @@ TEST_F(StreamingRpcTest, segment_stream_data_automatically) {
     ASSERT_LT(N * sizeof(N), stat.out_num_messages_m);
     ASSERT_FALSE(handler.failed());
     ASSERT_EQ(0, handler.idle_times());
-    ASSERT_EQ(N, handler._expected_next_value);
+    ASSERT_EQ(N, handler._expected_next_value.load());
     GFLAGS_NAMESPACE::SetCommandLineOption("stream_write_max_segment_size", "536870912");
 }

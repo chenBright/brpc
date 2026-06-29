@@ -16,6 +16,7 @@
 // under the License.
 
 #include <algorithm>                        // std::sort
+#include <atomic>                           // std::atomic
 #include <gtest/gtest.h>
 #include "butil/time.h"
 #include "butil/macros.h"
@@ -25,7 +26,7 @@
 
 namespace {
 typedef size_t value_type;
-bool g_stop = false;
+std::atomic<bool> g_stop(false);
 const size_t N = 1024*512;
 const size_t CAP = 8;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;

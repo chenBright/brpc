@@ -57,7 +57,7 @@ inline int pthread_spin_trylock(pthread_spinlock_t *__lock) {
     return EBUSY;
 }
 inline int pthread_spin_unlock(pthread_spinlock_t *__lock) {
-    return dispatch_semaphore_signal(__lock->sem);
+    return dispatch_semaphore_signal(__lock->sem) != NULL;
 }
 
 __END_DECLS

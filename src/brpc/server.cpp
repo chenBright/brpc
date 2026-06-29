@@ -70,6 +70,7 @@
 #include "brpc/builtin/prometheus_metrics_service.h"
 #include "brpc/builtin/memory_service.h"
 #include "brpc/details/method_status.h"
+#include "butil/debug/thread_annotations.h"  // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "brpc/load_balancer.h"
 #include "brpc/naming_service.h"
 #include "brpc/simple_data_pool.h"
@@ -444,6 +445,14 @@ Server::Server(ProfilerLinker)
     , _has_progressive_read_method(false) {
     BAIDU_CASSERT(offsetof(Server, _concurrency) % 64 == 0,
                   Server_concurrency_must_be_aligned_by_cacheline);
+    // _concurrency is a plain counter updated with NoBarrier atomics on the hot
+    // path and reset with a plain store in StartInternal(). The bvar sampler
+    // thread reads it via cast_no_barrier_int() for the "concurrency" gauge;
+    // observing a slightly stale value only affects monitoring, so annotate it
+    // as a benign race for TSan.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_concurrency, sizeof(_concurrency),
+        "server concurrency counter is sampled for monitoring only");
 }
 
 Server::~Server() {
@@ -671,15 +680,15 @@ Acceptor* Server::BuildAcceptor() {
 }
 
 int Server::InitializeOnce() {
-    if (_status != UNINITIALIZED) {
+    if (_status.load(butil::memory_order_relaxed) != UNINITIALIZED) {
         return 0;
     }
     GlobalInitializeOrDie();
 
-    if (_status != UNINITIALIZED) {
+    if (_status.load(butil::memory_order_relaxed) != UNINITIALIZED) {
         return 0;
     }
-    _status = READY;
+    _status.store(READY, butil::memory_order_relaxed);
     return 0;
 }
 
@@ -1158,7 +1167,7 @@ int Server::StartInternal(const butil::EndPoint& endpoint,
         }
         // Set `_status' to RUNNING before accepting connections
         // to prevent requests being rejected as ELOGOFF
-        _status = RUNNING;
+        _status.store(RUNNING, butil::memory_order_relaxed);
         time(&_last_start_time);
         GenerateVersionIfNeeded();
         g_running_server_count.fetch_add(1, butil::memory_order_relaxed);
@@ -1297,10 +1306,10 @@ int Server::Start(PortRange port_range, const ServerOptions* opt) {
 }
 
 int Server::Stop(int timeout_ms) {
-    if (_status != RUNNING) {
+    if (_status.load(butil::memory_order_relaxed) != RUNNING) {
         return -1;
     }
-    _status = STOPPING;
+    _status.store(STOPPING, butil::memory_order_relaxed);
 
     LOG(INFO) << "Server[" << version() << "] is going to quit";
 
@@ -1316,7 +1325,8 @@ int Server::Stop(int timeout_ms) {
 
 // NOTE: Join() can happen before Stop().
 int Server::Join() {
-    if (_status != RUNNING && _status != STOPPING) {
+    const Status cur_status = _status.load(butil::memory_order_relaxed);
+    if (cur_status != RUNNING && cur_status != STOPPING) {
         return -1;
     }
     if (_am) {
@@ -1361,7 +1371,7 @@ int Server::Join() {
     }
 
     g_running_server_count.fetch_sub(1, butil::memory_order_relaxed);
-    _status = READY;
+    _status.store(READY, butil::memory_order_relaxed);
     return 0;
 }
 

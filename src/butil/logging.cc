@@ -18,6 +18,8 @@
 // Date: 2012-10-08 23:53:50
 
 #include "butil/logging.h"
+#include "butil/compiler_specific.h"        // BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 #include <gflags/gflags.h>
 DEFINE_bool(log_as_json, false, "Print log as a valid JSON");
@@ -492,6 +494,14 @@ struct BAIDU_CACHELINE_ALIGNMENT LogInfo {
 struct BAIDU_CACHELINE_ALIGNMENT LogRequest {
     static LogRequest* const UNCONNECTED;
 
+    // `next` is used as a lock-free MPSC linked-list pointer. Producers
+    // publish themselves to `_log_head` via exchange(release) and write
+    // `next`; the consumer follows the list with a short spin-wait on
+    // `next != UNCONNECTED`. The cross-thread reads/writes on `next` are
+    // ordered by the release/acquire pair on `_log_head` plus the spin
+    // loop and are benign at the hardware level, but TSan can't infer
+    // this pattern. Functions touching `next` are therefore annotated
+    // with BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD to suppress false positives.
     LogRequest* next{NULL};
     LogInfo log_info;
 };
@@ -521,12 +531,20 @@ friend struct DefaultSingletonTraits<AsyncLogger>;
         }
     }
 
+    // The following 3 methods touch LogRequest::next which forms a
+    // lock-free MPSC linked list. The cross-thread accesses on `next`
+    // are synchronized via the release/acquire pair on `_log_head` and
+    // a short spin-wait, which TSan can't model. Mark them as
+    // no_sanitize_thread to suppress those benign-race reports.
+    BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
     void LogImpl(LogRequest* log_req);
 
     void Run() override;
 
+    BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
     void LogTask(LogRequest* req);
 
+    BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
     bool IsLogComplete(LogRequest* old_head);
 
     void DoLog(LogRequest* req);
@@ -1865,6 +1883,17 @@ bool add_vlog_site(const int** v, const char* filename, int line_no,
     if (site == NULL) {
         return false;
     }
+    // The site is published without a lock (optimistic locking + an append-only
+    // site list that never removes nodes) and its verbose level is then read
+    // locklessly by the VLOG macro at every callsite. This first-time-init race
+    // is benign by design, so tell TSan to ignore races on the whole VLogSite.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(site, sizeof(*site),
+                                          "benign VLOG callsite initialization");
+    // *v is the callsite's static `vlocal` pointer; it is published below
+    // (*v = &site->v()) and read locklessly by the VLOG macro. That publish
+    // race is benign for the same reason, so exempt the pointer itself too.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(v, sizeof(*v),
+                                          "benign VLOG vlocal publication");
     VModuleList* module_list = vmodule_list;
     int default_v = FLAGS_v;
     do {

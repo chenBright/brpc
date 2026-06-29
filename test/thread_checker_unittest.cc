@@ -2,12 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "butil/basictypes.h"
 #include "butil/logging.h"
 #include "butil/memory/scoped_ptr.h"
 #include "butil/threading/thread_checker.h"
 #include "butil/threading/simple_thread.h"
+#include "butil/compiler_specific.h"
 #include <gtest/gtest.h>
+
+#ifndef BUTIL_USE_TSAN
 
 // Duplicated from butil/threading/thread_checker.h so that we can be
 // good citizens there and undef the macro.
@@ -181,3 +185,5 @@ TEST(ThreadCheckerTest, DetachFromThreadInRelease) {
 #undef ENABLE_THREAD_CHECKER
 
 }  // namespace butil
+
+#endif // BUTIL_USE_TSAN

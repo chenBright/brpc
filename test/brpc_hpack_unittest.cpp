@@ -45,6 +45,7 @@ static void* DecodeManyDynamicTableSizeUpdates(void*) {
     return (void*)(p.Decode(&buf, &h) != 0);
 }
 
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(HPackTest, many_dynamic_table_size_updates) {
     const pid_t pid = fork();
     ASSERT_GE(pid, 0);
@@ -77,6 +78,7 @@ TEST_F(HPackTest, many_dynamic_table_size_updates) {
     ASSERT_TRUE(WIFEXITED(status));
     ASSERT_EQ(0, WEXITSTATUS(status));
 }
+#endif
 
 TEST_F(HPackTest, dynamic_table_size_update_before_header) {
     brpc::HPacker p;

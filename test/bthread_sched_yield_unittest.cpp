@@ -20,14 +20,15 @@
 #include <sched.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <butil/atomicops.h>
 #include <bthread/processor.h>
 
 namespace {
-volatile bool stop = false;
+butil::atomic<bool> stop(false);
 
 void* spinner(void*) {
     long counter = 0;
-    for (; !stop; ++counter) {
+    for (; !stop.load(butil::memory_order_relaxed); ++counter) {
         cpu_relax();
     }
     printf("spinned %ld\n", counter);
@@ -36,7 +37,7 @@ void* spinner(void*) {
 
 void* yielder(void*) {
     int counter = 0;
-    for (; !stop; ++counter) {
+    for (; !stop.load(butil::memory_order_relaxed); ++counter) {
         sched_yield();
     }
     printf("sched_yield %d\n", counter);
@@ -44,7 +45,6 @@ void* yielder(void*) {
 }
 
 TEST(SchedYieldTest, sched_yield_when_all_core_busy) {
-    stop = false;
     const int kNumCores = sysconf(_SC_NPROCESSORS_ONLN);
     ASSERT_TRUE(kNumCores > 0);
     pthread_t th0;
@@ -55,7 +55,7 @@ TEST(SchedYieldTest, sched_yield_when_all_core_busy) {
         pthread_create(&th[i], NULL, spinner, NULL);
     }
     sleep(1);
-    stop = true;
+    stop.store(true, butil::memory_order_relaxed);
     for (int i = 0; i < kNumCores; ++i) {
         pthread_join(th[i], NULL);
     }

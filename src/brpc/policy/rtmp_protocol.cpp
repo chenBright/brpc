@@ -28,6 +28,7 @@
 #include "brpc/span.h"
 #include "brpc/policy/dh.h"
 #include "brpc/policy/rtmp_protocol.h"
+#include "butil/debug/thread_annotations.h"  // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 // For printing logs with useful prefixes.
 #define RTMP_LOG(level, socket, mh)                                     \
@@ -1386,6 +1387,13 @@ void RtmpContext::AddReceivedBytes(Socket* socket, uint32_t sz) {
 RtmpChunkStream::RtmpChunkStream(RtmpContext* conn_ctx, uint32_t cs_id)
     : _conn_ctx(conn_ctx)
     , _cs_id(cs_id) {
+    // The write state _w is updated inside SerializeMessage(), which may run
+    // concurrently for the same chunk stream from different bthreads (each
+    // Socket::Write request is serialized in its Setup() phase by the
+    // submitting thread). Annotate _w as a benign race to silence TSan on it.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_w, sizeof(_w),
+        "rtmp chunk stream write state accessed during message serialization");
 }
 
 RtmpChunkStream::ReadParams::ReadParams() 

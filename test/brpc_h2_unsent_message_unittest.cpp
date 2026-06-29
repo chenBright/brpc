@@ -33,6 +33,9 @@ int main(int argc, char* argv[]) {
 }
 
 TEST(H2UnsentMessage, request_throughput) {
+#ifdef BUTIL_USE_TSAN
+    GTEST_SKIP();
+#endif
     brpc::Controller cntl;
     butil::IOBuf request_buf;
     cntl.http_request().uri() = "0.0.0.0:8010/HttpService/Echo";

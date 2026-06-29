@@ -185,10 +185,13 @@ public:
                   << ": Got " << *msg << " data=" << msg->data;
     }
 private:
-    int _called_on_stop;
-    int _called_on_first_message;
-    int _nvideomsg;
-    int _naudiomsg;
+    // These counters are written by I/O bthreads (in OnXXX callbacks) and read
+    // by the main thread (in assertions_*), so they must be atomic to avoid
+    // data races detected by ThreadSanitizer.
+    butil::atomic<int> _called_on_stop;
+    butil::atomic<int> _called_on_first_message;
+    butil::atomic<int> _nvideomsg;
+    butil::atomic<int> _naudiomsg;
 };
 
 class TestRtmpRetryingClientStream
@@ -228,9 +231,11 @@ public:
                   << ": Got " << *msg << " data=" << msg->data;
     }
 private:
-    int _called_on_stop;
-    int _called_on_first_message;
-    int _called_on_playable;
+    // Written by I/O bthreads (in OnXXX callbacks) and read by the main thread,
+    // so they must be atomic to avoid data races detected by ThreadSanitizer.
+    butil::atomic<int> _called_on_stop;
+    butil::atomic<int> _called_on_first_message;
+    butil::atomic<int> _called_on_playable;
 };
 
 const char* UNEXIST_NAME = "unexist_stream";
@@ -410,10 +415,13 @@ public:
     }
 private:
     int64_t _sleep_ms;
-    int _called_on_stop;
-    int _called_on_first_message;
-    int _nvideomsg;
-    int _naudiomsg;
+    // These counters are written by I/O bthreads (in OnXXX callbacks) and read
+    // by the main thread (in assertions_on_stop / TestBody), so they must be
+    // atomic to avoid data races detected by ThreadSanitizer.
+    butil::atomic<int> _called_on_stop;
+    butil::atomic<int> _called_on_first_message;
+    butil::atomic<int> _nvideomsg;
+    butil::atomic<int> _naudiomsg;
 };
 
 class PublishService : public brpc::RtmpService {

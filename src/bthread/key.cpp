@@ -26,6 +26,7 @@
 #include "bthread/errno.h"       // EAGAIN
 #include "bthread/task_group.h"  // TaskGroup
 #include "butil/atomicops.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "butil/macros.h"
 #include "butil/thread_key.h"
 #include "butil/thread_local.h"
@@ -210,7 +211,14 @@ public:
                              key.version, data);
             return 0;
         }
-        CHECK(false) << "bthread_setspecific is called on invalid " << key;
+        // NOTE: Use LOG(ERROR) instead of CHECK here. This is a recoverable
+        // error path (invalid key -> return EINVAL, exercised by
+        // KeyTest.use_invalid_keys). A CHECK would emit a FATAL log whose
+        // print_stack_on_check backtrace, when generated from a bthread / raw
+        // pthread context under ThreadSanitizer, segfaults during stack
+        // unwinding. LOG(ERROR) keeps the diagnostic without taking the
+        // FATAL/backtrace path.
+        LOG(ERROR) << "bthread_setspecific is called on invalid " << key;
         return EINVAL;
     }
 
@@ -327,6 +335,13 @@ private:
 };
 
 KeyTable* borrow_keytable(bthread_keytable_pool_t* pool) {
+    // The probe of pool->free_keytables below is intentionally done without
+    // holding pool->rwlock as a lock-free fast path. It may race with writers
+    // that update pool->free_keytables under the wrlock, but the race is
+    // benign: a stale read only leads to either taking the (locked) slow path
+    // that re-checks the value, or skipping it this time. The race is
+    // suppressed for TSan via BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED in
+    // bthread_keytable_pool_init.
     if (pool != NULL && (pool->list || pool->free_keytables)) {
         KeyTable* p;
         pthread_rwlock_rdlock(&pool->rwlock);
@@ -448,6 +463,14 @@ int bthread_keytable_pool_init(bthread_keytable_pool_t* pool) {
     pool->free_keytables = NULL;
     pool->size = 0;
     pool->destroyed = 0;
+    // borrow_keytable() probes pool->free_keytables without holding the rwlock
+    // (a lock-free fast path), which may race with writers updating it under
+    // the wrlock. The race is benign (a stale read only affects whether the
+    // locked slow path is taken, which re-checks the value), so suppress it
+    // for TSan here, once, right after the field is initialized.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &pool->free_keytables, sizeof(pool->free_keytables),
+        "Lock-free probe of pool->free_keytables in borrow_keytable");
     return 0;
 }
 

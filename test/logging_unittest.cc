@@ -487,7 +487,7 @@ TEST_F(LoggingTest, log_func) {
 }
 
 bool g_started = false;
-bool g_stopped = false;
+butil::atomic<bool> g_stopped(false);
 int g_prof_name_counter = 0;
 butil::atomic<uint64_t> test_logging_count(0);
 
@@ -496,7 +496,7 @@ void* test_async_log(void* arg) {
         return NULL;
     }
     auto log = (std::string*)(arg);
-    while (!g_stopped) {
+    while (!g_stopped.load(butil::memory_order_relaxed)) {
         LOG(INFO) << *log;
         test_logging_count.fetch_add(1);
     }

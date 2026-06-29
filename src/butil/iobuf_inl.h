@@ -535,8 +535,15 @@ struct IOBuf::Block {
         if (sampled()) {
             SubmitIOBufSample(this, -1);
         }
+        // Under ThreadSanitizer the standalone atomic_thread_fence(acquire) is
+        // unsupported (triggers -Wtsan under GCC); fold the acquire fence into
+        // the RMW via acq_rel so TSan can track the synchronization.
+#if defined(BUTIL_USE_TSAN)
+        if (nshared.fetch_sub(1, butil::memory_order_acq_rel) == 1) {
+#else
         if (nshared.fetch_sub(1, butil::memory_order_release) == 1) {
             butil::atomic_thread_fence(butil::memory_order_acquire);
+#endif
             if (!is_user_data()) {
                 iobuf::dec_g_nblock();
                 iobuf::dec_g_blockmem();

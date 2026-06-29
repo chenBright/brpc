@@ -102,7 +102,7 @@ const brpc::VRefId INVALID_EVENT_DATA_ID = brpc::INVALID_VREF_ID;
 
 typedef brpc::VersionedRefWithIdUniquePtr<UserData> UserDataUniquePtr;
 
-volatile bool vref_thread_stop = false;
+butil::atomic<bool> vref_thread_stop(false);
 butil::atomic<int> g_count(1);
 
 void TestVRef(UserDataId id) {
@@ -181,19 +181,24 @@ pthread_mutex_t err_fd_mutex = PTHREAD_MUTEX_INITIALIZER;
 std::vector<int> rel_fd;
 pthread_mutex_t rel_fd_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-volatile bool client_stop = false;
+butil::atomic<bool> client_stop(false);
+
+// Accumulates the bytes read by the server side. Its lifetime is independent of
+// SocketExtra, so the main thread does not have to touch a SocketExtra object
+// that may have already been recycled (deleted) by a dispatcher bthread.
+butil::atomic<size_t> g_server_bytes(0);
 
 struct BAIDU_CACHELINE_ALIGNMENT ClientMeta {
     int fd;
-    size_t times;
-    size_t bytes;
+    butil::atomic<size_t> times;
+    butil::atomic<size_t> bytes;
 };
 
 struct BAIDU_CACHELINE_ALIGNMENT SocketExtra : public brpc::SocketUser {
     char* buf;
     size_t buf_cap;
-    size_t bytes;
-    size_t times;
+    butil::atomic<size_t> bytes;
+    butil::atomic<size_t> times;
 
     SocketExtra() {
         buf_cap = 32768;
@@ -231,6 +236,7 @@ struct BAIDU_CACHELINE_ALIGNMENT SocketExtra : public brpc::SocketUser {
             } else if (n > 0) {
                 e->bytes += n;
                 ++e->times;
+                g_server_bytes.fetch_add(n, butil::memory_order_relaxed);
 #ifdef BRPC_SOCKET_HAS_EOF
                 if ((size_t)n < e->buf_cap && brpc::has_epollrdhup) {
                     break;
@@ -318,6 +324,7 @@ TEST_F(EventDispatcherTest, dispatch_tasks) {
 #endif
 
     client_stop = false;
+    g_server_bytes.store(0, butil::memory_order_relaxed);
 
     const size_t NCLIENT = 16;
 
@@ -358,11 +365,12 @@ TEST_F(EventDispatcherTest, dispatch_tasks) {
     LOG(INFO) << "End profiling";
 
     size_t client_bytes = 0;
-    size_t server_bytes = 0;
     for (size_t i = 0; i < NCLIENT; ++i) {
         client_bytes += cm[i]->bytes;
-        server_bytes += sm[i]->bytes;
     }
+    // Read the server bytes from the global accumulator instead of sm[i], whose
+    // SocketExtra object may have been recycled by a dispatcher bthread.
+    size_t server_bytes = g_server_bytes.load(butil::memory_order_relaxed);
     LOG(INFO) << "client_tp=" << client_bytes / (double)tm.u_elapsed()
               << "MB/s server_tp=" << server_bytes / (double)tm.u_elapsed() 
               << "MB/s";
@@ -506,7 +514,7 @@ friend class brpc::IOEvent<EventPipe>;
     brpc::IOEvent<EventPipe> _io_event;
     int _pipe_fds[2];
 
-    size_t _input_event_count;
+    butil::atomic<size_t> _input_event_count;
 };
 
 TEST_F(EventDispatcherTest, customize_dispatch_task) {

@@ -214,12 +214,26 @@
 #define BUTIL_USE_ASAN
 #endif
 
+// Instruct TSan is enabled.
+#if defined(BUTIL_USE_TSAN)
+#error "BUTIL_USE_TSAN cannot be set directly."
+#elif BUTIL_HAS_FEATURE(thread_sanitizer) || defined(__SANITIZE_THREAD__)
+#define BUTIL_USE_TSAN
+#endif
+
 // https://github.com/google/sanitizers/wiki/AddressSanitizer#turning-off-instrumentation
 // Attribute to instruct ASan to ignore a function.
 #if defined(COMPILER_GCC)
 # define BUTIL_ATTRIBUTE_NO_SANITIZE_ADDRESS __attribute__((no_sanitize_address))
 #else
 # define BUTIL_ATTRIBUTE_NO_SANITIZE_ADDRESS
+#endif
+
+// Attribute to instruct TSan to ignore a function.
+#if defined(COMPILER_GCC)
+# define BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
+#else
+# define BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
 #endif
 
 

@@ -95,9 +95,9 @@ LINKOPTS = [
     ],
     "//conditions:default": [],
 }) + select({
-        "//bazel/config:brpc_with_asan": ["-fsanitize=address"],
-        "//conditions:default": [],
-  })
+    "//bazel/config:brpc_with_asan": ["-fsanitize=address"],
+    "//conditions:default": [],
+})
 
 genrule(
     name = "config_h",

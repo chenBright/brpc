@@ -276,8 +276,8 @@ TEST_F(ExecutionQueueTest, performance) {
     }
 }
 
-volatile bool g_suspending = false;
-volatile bool g_should_be_urgent = false;
+butil::atomic<bool> g_suspending(false);
+butil::atomic<bool> g_should_be_urgent(false);
 int urgent_times = 0;
 
 int add_with_suspend(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
@@ -286,8 +286,8 @@ int add_with_suspend(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
         stopped = true;
         return 0;
     }
-    if (g_should_be_urgent) {
-        g_should_be_urgent = false;
+    if (g_should_be_urgent.load(butil::memory_order_relaxed)) {
+        g_should_be_urgent.store(false, butil::memory_order_relaxed);
         EXPECT_EQ(-1, iter->value) << urgent_times;
         if (iter->event) { iter->event->signal(); }
         ++iter;
@@ -296,11 +296,11 @@ int add_with_suspend(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
     } else {
         for (; iter; ++iter) {
             if (iter->value == -100) {
-                g_suspending = true;
-                while (g_suspending) {
+                g_suspending.store(true, butil::memory_order_relaxed);
+                while (g_suspending.load(butil::memory_order_relaxed)) {
                     bthread_usleep(100);
                 }
-                g_should_be_urgent = true;
+                g_should_be_urgent.store(true, butil::memory_order_relaxed);
                 if (iter->event) { iter->event->signal(); }
                 EXPECT_FALSE(++iter);
                 return 0;
@@ -314,7 +314,7 @@ int add_with_suspend(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
 }
 
 void test_execute_urgent(bool use_pthread) {
-    g_should_be_urgent = false;
+    g_should_be_urgent.store(false, butil::memory_order_relaxed);
     pthread_t threads[10];
     bthread::ExecutionQueueId<LongIntTask> queue_id = { 0 }; // to suppress warnings
     bthread::ExecutionQueueOptions options;
@@ -337,17 +337,17 @@ void test_execute_urgent(bool use_pthread) {
     for (size_t i = 0; i < ARRAY_SIZE(threads); ++i) {
         pthread_create(&threads[i], NULL, &push_thread, &pa);
     }
-    g_suspending = false;
+    g_suspending.store(false, butil::memory_order_relaxed);
     usleep(1000);
 
     for (int i = 0; i < 100; ++i) {
         ASSERT_EQ(0, bthread::execution_queue_execute(queue_id, -100));
-        while (!g_suspending) {
+        while (!g_suspending.load(butil::memory_order_relaxed)) {
             usleep(100);
         }
         ASSERT_EQ(0, bthread::execution_queue_execute(
             queue_id, -1, &bthread::TASK_OPTIONS_URGENT));
-        g_suspending = false;
+        g_suspending.store(false, butil::memory_order_relaxed);
         usleep(100);
     }
     usleep(500* 1000);
@@ -368,8 +368,8 @@ TEST_F(ExecutionQueueTest, execute_urgent) {
 }
 
 void test_urgent_task_is_the_last_task(bool use_pthread) {
-    g_should_be_urgent = false;
-    g_suspending = false;
+    g_should_be_urgent.store(false, butil::memory_order_relaxed);
+    g_suspending.store(false, butil::memory_order_relaxed);
     bthread::ExecutionQueueId<LongIntTask> queue_id = { 0 }; // to suppress warnings
     bthread::ExecutionQueueOptions options;
     options.use_pthread = use_pthread;
@@ -381,9 +381,9 @@ void test_urgent_task_is_the_last_task(bool use_pthread) {
     int64_t result = 0;
     ASSERT_EQ(0, bthread::execution_queue_start(&queue_id, &options,
                                                 add_with_suspend, &result));
-    g_suspending = false;
+    g_suspending.store(false, butil::memory_order_relaxed);
     ASSERT_EQ(0, bthread::execution_queue_execute(queue_id, -100));
-    while (!g_suspending) {
+    while (!g_suspending.load(butil::memory_order_relaxed)) {
         usleep(10);
     }
     LOG(INFO) << "Going to push";
@@ -395,8 +395,7 @@ void test_urgent_task_is_the_last_task(bool use_pthread) {
     ASSERT_EQ(0, bthread::execution_queue_execute(
         queue_id, -1, &bthread::TASK_OPTIONS_URGENT));
     usleep(100);
-    g_suspending = false;
-    butil::atomic_thread_fence(butil::memory_order_acq_rel);
+    g_suspending.store(false, butil::memory_order_relaxed);
     usleep(10 * 1000);
     LOG(INFO) << "going to quit";
     ASSERT_EQ(0, bthread::execution_queue_stop(queue_id));
@@ -568,6 +567,8 @@ void test_should_start_new_thread_on_more_tasks(bool use_pthread) {
     bthread::futex_wake_private(&futex, 1);
     ASSERT_EQ(0, bthread::execution_queue_stop(queue_id));
     ASSERT_EQ(0, bthread::execution_queue_join(queue_id));
+    // Join the thread created above to avoid leaking it (reported by TSan).
+    ASSERT_EQ(0, pthread_join(thread, NULL));
 }
 
 TEST_F(ExecutionQueueTest, should_start_new_thread_on_more_tasks) {
@@ -630,8 +631,8 @@ int add_with_suspend2(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
     }
     for (; iter; ++iter) {
         if (iter->value == -100) {
-            g_suspending = true;
-            while (g_suspending) {
+            g_suspending.store(true, butil::memory_order_relaxed);
+            while (g_suspending.load(butil::memory_order_relaxed)) {
                 usleep(10);
             }
             if (iter->event) { iter->event->signal(); }
@@ -655,10 +656,10 @@ void test_cancel(bool use_pthread) {
     int64_t result = 0;
     ASSERT_EQ(0, bthread::execution_queue_start(&queue_id, &options,
                                                 add_with_suspend2, &result));
-    g_suspending = false;
+    g_suspending.store(false, butil::memory_order_relaxed);
     bthread::TaskHandle handle0;
     ASSERT_EQ(0, bthread::execution_queue_execute(queue_id, -100, NULL, &handle0));
-    while (!g_suspending) {
+    while (!g_suspending.load(butil::memory_order_relaxed)) {
         usleep(10);
     }
     ASSERT_EQ(1, bthread::execution_queue_cancel(handle0));
@@ -666,7 +667,7 @@ void test_cancel(bool use_pthread) {
     bthread::TaskHandle handle1;
     ASSERT_EQ(0, bthread::execution_queue_execute(queue_id, 100, NULL, &handle1));
     ASSERT_EQ(0, bthread::execution_queue_cancel(handle1));
-    g_suspending = false;
+    g_suspending.store(false, butil::memory_order_relaxed);
     ASSERT_EQ(-1, bthread::execution_queue_cancel(handle1));
     ASSERT_EQ(0, bthread::execution_queue_stop(queue_id));
     ASSERT_EQ(0, bthread::execution_queue_join(queue_id));
@@ -860,8 +861,8 @@ int add_with_suspend3(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
     }
     for (; iter; ++iter) {
         if (iter->value == -100) {
-            g_suspending = true;
-            while (g_suspending) {
+            g_suspending.store(true, butil::memory_order_relaxed);
+            while (g_suspending.load(butil::memory_order_relaxed)) {
                 usleep(10);
             }
             if (iter->event) { iter->event->signal(); }
@@ -874,7 +875,7 @@ int add_with_suspend3(void* meta, bthread::TaskIterator<LongIntTask>& iter) {
 }
 
 void test_cancel_unexecuted_high_priority_task(bool use_pthread) {
-    g_should_be_urgent = false;
+    g_should_be_urgent.store(false, butil::memory_order_relaxed);
     bthread::ExecutionQueueId<LongIntTask> queue_id = { 0 }; // to suppress warnings
     bthread::ExecutionQueueOptions options;
     options.use_pthread = use_pthread;
@@ -888,7 +889,7 @@ void test_cancel_unexecuted_high_priority_task(bool use_pthread) {
                                                 add_with_suspend3, &result));
     // Push a normal task to make the executor suspend
     ASSERT_EQ(0, bthread::execution_queue_execute(queue_id, -100));
-    while (!g_suspending) {
+    while (!g_suspending.load(butil::memory_order_relaxed)) {
         usleep(10);
     }
     // At this point, executor is suspended by the first task. Then we put
@@ -900,7 +901,7 @@ void test_cancel_unexecuted_high_priority_task(bool use_pthread) {
     ASSERT_EQ(0, bthread::execution_queue_cancel(h));
 
     // Resume executor
-    g_suspending = false;
+    g_suspending.store(false, butil::memory_order_relaxed);
 
     // Push a normal task
     ASSERT_EQ(0, bthread::execution_queue_execute(queue_id, 12345));

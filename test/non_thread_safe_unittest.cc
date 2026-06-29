@@ -2,16 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "butil/basictypes.h"
+#include "butil/compiler_specific.h"  // BUTIL_USE_TSAN
 #include "butil/logging.h"
 #include "butil/memory/scoped_ptr.h"
 #include "butil/threading/non_thread_safe.h"
 #include "butil/threading/simple_thread.h"
+#include "butil/compiler_specific.h"
 #include <gtest/gtest.h>
+
+#ifndef BUTIL_USE_TSAN
 
 // Duplicated from butil/threading/non_thread_safe.h so that we can be
 // good citizens there and undef the macro.
-#if (!defined(NDEBUG) || defined(DCHECK_ALWAYS_ON))
+#if !defined(NDEBUG) || defined(DCHECK_ALWAYS_ON)
 #define ENABLE_NON_THREAD_SAFE 1
 #else
 #define ENABLE_NON_THREAD_SAFE 0
@@ -148,6 +153,7 @@ void NonThreadSafeClass::DestructorOnDifferentThreadImpl() {
 }
 
 #if ENABLE_NON_THREAD_SAFE
+// See the note above: skip this death test when TSan is enabled.
 TEST(NonThreadSafeDeathTest, DestructorNotAllowedOnDifferentThreadInDebug) {
   ASSERT_DEATH({
       NonThreadSafeClass::DestructorOnDifferentThreadImpl();
@@ -165,3 +171,5 @@ TEST(NonThreadSafeTest, DestructorAllowedOnDifferentThreadInRelease) {
 #undef ENABLE_NON_THREAD_SAFE
 
 }  // namespace butil
+
+#endif // BUTIL_USE_TSAN

@@ -24,8 +24,8 @@
 
 namespace brpc {
 
-static int cast_int(void* arg) {
-    return *(int*)arg;
+static int load_atomic_int(void* arg) {
+    return static_cast<butil::atomic<int>*>(arg)->load(butil::memory_order_relaxed);
 }
 
 static int cast_cl(void* arg) {
@@ -38,7 +38,7 @@ static int cast_cl(void* arg) {
 
 MethodStatus::MethodStatus()
     : _nconcurrency(0)
-    , _nconcurrency_bvar(cast_int, &_nconcurrency)
+    , _nconcurrency_bvar(load_atomic_int, &_nconcurrency)
     , _eps_bvar(&_nerror_bvar)
     , _max_concurrency_bvar(cast_cl, &_cl)
 {

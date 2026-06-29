@@ -27,6 +27,7 @@
 #include "bthread/types.h"
 #include "bthread/context.h"        // bthread_fcontext_t
 #include "butil/object_pool.h"
+#include "butil/compiler_specific.h" // BUTIL_USE_TSAN
 
 namespace bthread {
 
@@ -66,6 +67,12 @@ struct ContextualStack {
     bthread_fcontext_t context;
     StackType stacktype;
     StackStorage storage;
+#ifdef BUTIL_USE_TSAN
+    // TSan fiber handle bound to this stack. For bthread stacks it is created
+    // by __tsan_create_fiber and destroyed with the stack; for the worker main
+    // stack it is the worker's native fiber and MUST NOT be destroyed.
+    void* tsan_fiber{NULL};
+#endif // BUTIL_USE_TSAN
 };
 
 // Get a stack in the `type' and run `entry' at the first time that the

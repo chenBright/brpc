@@ -33,6 +33,7 @@
 #include "butil/thread_local.h"           // BAIDU_THREAD_LOCAL
 #include "butil/memory/aligned_memory.h"  // butil::AlignedMemory
 #include "butil/debug/address_annotations.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 #ifdef BUTIL_OBJECT_POOL_NEED_FREE_ITEM_NUM
 #define BAIDU_OBJECT_POOL_FREE_ITEM_NUM_ADD1                    \
@@ -377,6 +378,16 @@ private:
             atexit(unpoison_all_objects_before_leak_check);
         }
 #endif
+        // pop_free_chunk() peeks _free_chunks.empty() locklessly as a fast path
+        // before taking _free_chunks_mutex, while push_free_chunk() mutates the
+        // vector under the lock. The lockless reader only decides whether it is
+        // worth locking and re-checks emptiness after acquiring the lock, so a
+        // stale read is always corrected and never dereferences freed memory.
+        // Mark the vector's control block benign so TSan stops flagging this
+        // intentional lock-free fast path.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &_free_chunks, sizeof(_free_chunks),
+            "benign lock-free ObjectPool free chunk emptiness check");
     }
 
     ~ObjectPool() {

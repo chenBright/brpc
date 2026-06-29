@@ -670,6 +670,15 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
 
 int butex_wait(void* arg, int expected_value, const timespec* abstime, bool prepend) {
     Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+#if defined(BUTIL_USE_TSAN)
+    // Under ThreadSanitizer the standalone atomic_thread_fence(acquire) below is
+    // unsupported (triggers -Wtsan under GCC); use an acquire load instead so
+    // the synchronization is carried by the atomic and understood by TSan.
+    if (b->value.load(butil::memory_order_acquire) != expected_value) {
+        errno = EWOULDBLOCK;
+        return -1;
+    }
+#else
     if (b->value.load(butil::memory_order_relaxed) != expected_value) {
         errno = EWOULDBLOCK;
         // Sometimes we may take actions immediately after unmatched butex,
@@ -677,6 +686,7 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime, bool prep
         butil::atomic_thread_fence(butil::memory_order_acquire);
         return -1;
     }
+#endif
     TaskGroup* g = tls_task_group;
     if (NULL == g || g->is_current_pthread_task()) {
         return butex_wait_from_pthread(g, b, expected_value, abstime, prepend);

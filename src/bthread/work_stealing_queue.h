@@ -57,7 +57,7 @@ public:
                        << " which must be power of 2";
             return -1;
         }
-        _buffer = new(std::nothrow) T[capacity];
+        _buffer = new(std::nothrow) butil::atomic<T>[capacity];
         if (NULL == _buffer) {
             return -1;
         }
@@ -75,7 +75,10 @@ public:
         if (b >= t + _capacity) { // Full queue.
             return false;
         }
-        _buffer[b & (_capacity - 1)] = x;
+        // Buffer slots are accessed concurrently by steal(); use relaxed
+        // atomics so the access is well-defined (ordering is established by the
+        // acquire/release on _top/_bottom). Avoids a TSan-reported data race.
+        _buffer[b & (_capacity - 1)].store(x, butil::memory_order_relaxed);
         _bottom.store(b + 1, butil::memory_order_release);
         return true;
     }
@@ -93,14 +96,23 @@ public:
             return false;
         }
         const size_t newb = b - 1;
+        // Under ThreadSanitizer the standalone seq_cst fence is unsupported
+        // (triggers -Wtsan under GCC and cannot be modeled). Express the same
+        // StoreLoad ordering via seq_cst atomics so TSan can track it; normal
+        // builds keep the cheaper relaxed ops + seq_cst fence.
+#if defined(BUTIL_USE_TSAN)
+        _bottom.store(newb, butil::memory_order_seq_cst);
+        t = _top.load(butil::memory_order_seq_cst);
+#else
         _bottom.store(newb, butil::memory_order_relaxed);
         butil::atomic_thread_fence(butil::memory_order_seq_cst);
         t = _top.load(butil::memory_order_relaxed);
+#endif
         if (t > newb) {
             _bottom.store(b, butil::memory_order_relaxed);
             return false;
         }
-        *val = _buffer[newb & (_capacity - 1)];
+        *val = _buffer[newb & (_capacity - 1)].load(butil::memory_order_relaxed);
         if (t != newb) {
             return true;
         }
@@ -122,12 +134,18 @@ public:
             return false;
         }
         do {
+            // seq_cst load replaces "seq_cst fence + acquire load" so TSan can
+            // model the ordering (the standalone fence triggers -Wtsan).
+#if defined(BUTIL_USE_TSAN)
+            b = _bottom.load(butil::memory_order_seq_cst);
+#else
             butil::atomic_thread_fence(butil::memory_order_seq_cst);
             b = _bottom.load(butil::memory_order_acquire);
+#endif
             if (t >= b) {
                 return false;
             }
-            *val = _buffer[t & (_capacity - 1)];
+            *val = _buffer[t & (_capacity - 1)].load(butil::memory_order_relaxed);
         } while (!_top.compare_exchange_weak(t, t + 1,
                                                butil::memory_order_seq_cst,
                                                butil::memory_order_relaxed));
@@ -148,7 +166,7 @@ private:
 
     butil::atomic<size_t> _bottom;
     size_t _capacity;
-    T* _buffer;
+    butil::atomic<T>* _buffer;
     BAIDU_CACHELINE_ALIGNMENT butil::atomic<size_t> _top;
 };
 

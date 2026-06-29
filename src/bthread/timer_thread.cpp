@@ -29,6 +29,7 @@
 #include "bthread/sys_futex.h"
 #include "bthread/timer_thread.h"
 #include "bthread/log.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 namespace bthread {
 
@@ -160,7 +161,14 @@ int TimerThread::start(const TimerThreadOptions* options_in) {
     if (NULL == _buckets) {
         LOG(ERROR) << "Fail to new _buckets";
         return ENOMEM;
-    }        
+    }
+    // consume_tasks() peeks Bucket::_task_head without the lock as a fast path
+    // (see its comment); schedule() writes it under Bucket::_mutex. This is an
+    // intentional benign double-check, so tell TSan to ignore races on the
+    // buckets' inline bookkeeping.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        _buckets, sizeof(Bucket) * _options.num_buckets,
+        "benign lock-free TimerThread bucket peek");
     const int ret = pthread_create(&_thread, NULL, TimerThread::run_this, this);
     if (ret) {
         return ret;
@@ -329,13 +337,23 @@ void TimerThread::run() {
     tasks.reserve(4096);
 
     // vars
+    // These counters are written only by this timer thread but sampled
+    // concurrently by the bvar sampler thread via deref_value(). The sampling
+    // reads are intentionally lock-free (stale stats are fine), so mark the
+    // counters as benign races for TSan.
     size_t nscheduled = 0;
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&nscheduled, sizeof(nscheduled),
+                                          "benign bvar stat sampling");
     bvar::PassiveStatus<size_t> nscheduled_var(deref_value<size_t>, &nscheduled);
     bvar::PerSecond<bvar::PassiveStatus<size_t> > nscheduled_second(&nscheduled_var);
     size_t ntriggered = 0;
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&ntriggered, sizeof(ntriggered),
+                                          "benign bvar stat sampling");
     bvar::PassiveStatus<size_t> ntriggered_var(deref_value<size_t>, &ntriggered);
     bvar::PerSecond<bvar::PassiveStatus<size_t> > ntriggered_second(&ntriggered_var);
     double busy_seconds = 0;
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&busy_seconds, sizeof(busy_seconds),
+                                          "benign bvar stat sampling");
     bvar::PassiveStatus<double> busy_seconds_var(deref_value<double>, &busy_seconds);
     bvar::PerSecond<bvar::PassiveStatus<double> > busy_seconds_second(&busy_seconds_var);
     if (!_options.bvar_prefix.empty()) {

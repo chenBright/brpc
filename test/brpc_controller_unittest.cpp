@@ -24,6 +24,7 @@
 #include "butil/logging.h"
 #include "butil/time.h"
 #include "butil/macros.h"
+#include "butil/atomicops.h"
 #include "brpc/socket.h"
 #include "brpc/server.h"
 #include "brpc/channel.h"
@@ -37,8 +38,8 @@ protected:
     virtual void TearDown() {};
 };
 
-void MyCancelCallback(bool* cancel_flag) {
-    *cancel_flag = true;
+void MyCancelCallback(butil::atomic<bool>* cancel_flag) {
+    cancel_flag->store(true, butil::memory_order_release);
 }
 
 TEST_F(ControllerTest, notify_on_failed) {
@@ -49,13 +50,15 @@ TEST_F(ControllerTest, notify_on_failed) {
     cntl._current_call.peer_id = id;
     ASSERT_FALSE(cntl.IsCanceled());
 
-    bool cancel = false;
+    butil::atomic<bool> cancel(false);
     cntl.NotifyOnCancel(brpc::NewCallback(&MyCancelCallback, &cancel));
     // Trigger callback
     brpc::Socket::SetFailed(id);
-    usleep(20000); // sleep a while to wait for the canceling which will be
-                   // happening in another thread.
-    ASSERT_TRUE(cancel);
+    // Wait for the canceling which will be happening in another thread.
+    for (int i = 0; i < 100 && !cancel.load(butil::memory_order_acquire); ++i) {
+        usleep(20000);
+    }
+    ASSERT_TRUE(cancel.load(butil::memory_order_acquire));
     ASSERT_TRUE(cntl.IsCanceled());
 }
 
@@ -67,11 +70,11 @@ TEST_F(ControllerTest, notify_on_destruction) {
     cntl->_current_call.peer_id = id;
     ASSERT_FALSE(cntl->IsCanceled());
 
-    bool cancel = false;
+    butil::atomic<bool> cancel(false);
     cntl->NotifyOnCancel(brpc::NewCallback(&MyCancelCallback, &cancel));
     // Trigger callback
     delete cntl;
-    ASSERT_TRUE(cancel);
+    ASSERT_TRUE(cancel.load(butil::memory_order_acquire));
 }
 
 #if ! BRPC_WITH_GLOG

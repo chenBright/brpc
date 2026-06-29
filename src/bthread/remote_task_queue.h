@@ -24,6 +24,7 @@
 
 #include "butil/containers/bounded_queue.h"
 #include "butil/macros.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 namespace bthread {
 
@@ -45,6 +46,15 @@ public:
         }
         butil::BoundedQueue<bthread_t> q(q_mem, memsize, butil::OWNS_STORAGE);
         _tasks.swap(q);
+        // The lock-free empty() fast-path in pop() reads the queue's counter
+        // while another worker may be writing it under _mutex. This is an
+        // intentional double-check (a stale read at worst causes one missed or
+        // extra steal attempt; the locked pop() re-checks). Mark the queue's
+        // bookkeeping as a benign race so TSan ignores it, without affecting
+        // other BoundedQueue users.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &_tasks, sizeof(_tasks),
+            "benign lock-free RemoteTaskQueue empty()");
         return 0;
     }
 

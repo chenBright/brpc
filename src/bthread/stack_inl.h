@@ -22,6 +22,8 @@
 #ifndef BTHREAD_ALLOCATE_STACK_INL_H
 #define BTHREAD_ALLOCATE_STACK_INL_H
 
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_*
+
 DECLARE_int32(guard_page_size);
 DECLARE_int32(tc_stack_small);
 DECLARE_int32(tc_stack_normal);
@@ -103,6 +105,43 @@ private:
 
 #endif // BUTIL_USE_ASAN
 
+#ifdef BUTIL_USE_TSAN
+namespace internal {
+
+// Creates a TSan fiber for a freshly allocated bthread stack. The fiber lives
+// for the whole pooled lifetime of the stack.
+BUTIL_FORCE_INLINE void TSanCreateFiber(ContextualStack* cs) {
+    cs->tsan_fiber = BUTIL_TSAN_CREATE_FIBER(0);
+}
+
+// Destroys the TSan fiber owned by a bthread stack. The worker main stack does
+// not own its fiber (it reuses the worker's native fiber), so this is only
+// invoked for pooled bthread stacks.
+BUTIL_FORCE_INLINE void TSanDestroyFiber(ContextualStack* cs) {
+    if (NULL != cs->tsan_fiber) {
+        BUTIL_TSAN_DESTROY_FIBER(cs->tsan_fiber);
+        cs->tsan_fiber = NULL;
+    }
+}
+
+// Tells TSan the execution is about to switch to `cs`'s fiber. Must be called
+// right before the actual stack jump.
+BUTIL_FORCE_INLINE void TSanSwitchToFiber(ContextualStack* cs) {
+    BUTIL_TSAN_SWITCH_TO_FIBER(cs->tsan_fiber, 0);
+}
+
+} // namespace internal
+
+#define BTHREAD_TSAN_CREATE_FIBER(cs) ::bthread::internal::TSanCreateFiber(cs)
+#define BTHREAD_TSAN_DESTROY_FIBER(cs) ::bthread::internal::TSanDestroyFiber(cs)
+#define BTHREAD_TSAN_SWITCH_TO_FIBER(cs) ::bthread::internal::TSanSwitchToFiber(cs)
+#else
+// If TSan is not used, these annotations are no-ops.
+#define BTHREAD_TSAN_CREATE_FIBER(cs) ((void)(cs))
+#define BTHREAD_TSAN_DESTROY_FIBER(cs) ((void)(cs))
+#define BTHREAD_TSAN_SWITCH_TO_FIBER(cs) ((void)(cs))
+#endif // BUTIL_USE_TSAN
+
 struct MainStackClass {};
 
 struct SmallStackClass {
@@ -134,6 +173,8 @@ template <typename StackClass> struct StackFactory {
             stacktype = (StackType)StackClass::stacktype;
             // It's poisoned prior to use.
             BTHREAD_ASAN_POISON_MEMORY_REGION(storage);
+            // Bind a TSan fiber to this stack for its whole pooled lifetime.
+            BTHREAD_TSAN_CREATE_FIBER(this);
         }
         ~Wrapper() {
             if (context) {
@@ -142,6 +183,7 @@ template <typename StackClass> struct StackFactory {
                 BTHREAD_ASAN_UNPOISON_MEMORY_REGION(storage);
                 deallocate_stack_storage(&storage);
                 storage.zeroize();
+                BTHREAD_TSAN_DESTROY_FIBER(this);
             }
         }
     };
@@ -213,6 +255,10 @@ inline void return_stack(ContextualStack* s) {
 }
 
 inline void jump_stack(ContextualStack* from, ContextualStack* to) {
+    BTHREAD_SCOPED_ASAN_FIBER_SWITCHER(to->storage);
+    // Notify TSan of the fiber switch right before the assembly stack jump,
+    // which TSan cannot observe by itself.
+    BTHREAD_TSAN_SWITCH_TO_FIBER(to);
     bthread_jump_fcontext(&from->context, to->context, 0/*not skip remained*/);
 }
 

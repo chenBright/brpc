@@ -24,6 +24,7 @@
 #include "butil/memory/singleton_on_pthread_once.h"
 #include "butil/resource_pool.h"         // butil::get_resource
 #include "butil/threading/platform_thread.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ACQUIRE/RELEASE
 
 namespace bthread {
 
@@ -66,7 +67,7 @@ inline ExecutionQueueVars* get_execq_vars() {
 }
 
 void ExecutionQueueBase::start_execute(TaskNode* node) {
-    node->next = TaskNode::UNCONNECTED;
+    node->next.store(TaskNode::UNCONNECTED, butil::memory_order_relaxed);
     node->status = TaskNode::UNEXECUTED;
     node->iterated = false;
     if (node->high_priority) {
@@ -77,14 +78,23 @@ void ExecutionQueueBase::start_execute(TaskNode* node) {
         // point, we think it's just fine.
         _high_priority_tasks.fetch_add(1, butil::memory_order_relaxed);
     }
-    TaskNode* const prev_head = _head.exchange(node, butil::memory_order_release);
+    // acq_rel:
+    // - The release publishes this node's fields to the consumer (_more_tasks).
+    // - The acquire picks up the memory effects published by a previous executor
+    //   that finished and set _head to NULL via an acq_rel CAS in _more_tasks(),
+    //   so those effects propagate to the executor started below and thus become
+    //   visible to execution_queue_join().
+    TaskNode* const prev_head = _head.exchange(node, butil::memory_order_acq_rel);
     if (prev_head != NULL) {
-        node->next = prev_head;
+        // The release store pairs with the acquire load of `next' in
+        // _more_tasks() so that the consumer sees all fields of this node set
+        // before it is linked into the queue.
+        node->next.store(prev_head, butil::memory_order_release);
         return;
     }
     // Get the right to execute the task, start a bthread to avoid deadlock
     // or stack overflow
-    node->next = NULL;
+    node->next.store(NULL, butil::memory_order_relaxed);
     node->q = this;
 
     ExecutionQueueVars* const vars = get_execq_vars();
@@ -97,9 +107,15 @@ void ExecutionQueueBase::start_execute(TaskNode* node) {
         if (node->high_priority) {
             _high_priority_tasks.fetch_sub(niterated, butil::memory_order_relaxed);
         }
+        // Cache _clear_func while we still own the queue. _more_tasks() below
+        // relinquishes ownership by CAS-ing _head to NULL; afterwards another
+        // executor that runs the stop_task may recycle this slot and create()
+        // may reuse it concurrently, so we must NOT read any member of `this`
+        // (e.g. _clear_func) past that point. Pass the cached value explicitly.
+        const clear_task_mem clear_func = _clear_func;
         if (!_more_tasks(tmp, &tmp, !node->iterated)) {
             vars->execq_active_count << -1;
-            return_task_node(node);
+            return_task_node(node, clear_func);
             return;
         }
     }
@@ -145,14 +161,20 @@ void* ExecutionQueueBase::_execute_tasks(void* arg) {
     ExecutionQueueVars* vars = get_execq_vars();
     TaskNode* head = (TaskNode*)arg;
     ExecutionQueueBase* m = (ExecutionQueueBase*)head->q;
+    // Cache _clear_func while we still own the queue. Once _more_tasks() below
+    // relinquishes ownership (CAS _head to NULL), a non-destroying executor must
+    // not read any member of `m` because another executor running the stop_task
+    // may recycle this slot and create() may reuse it concurrently. Returning
+    // task nodes only needs the clear_func, so capture it up front.
+    const clear_task_mem clear_func = m->_clear_func;
     TaskNode* cur_tail = NULL;
     bool destroy_queue = false;
     for (;;) {
         if (head->iterated) {
-            CHECK(head->next != NULL);
+            CHECK(head->next.load(butil::memory_order_relaxed) != NULL);
             TaskNode* saved_head = head;
-            head = head->next;
-            m->return_task_node(saved_head);
+            head = head->next.load(butil::memory_order_relaxed);
+            return_task_node(saved_head, clear_func);
         }
         int rc = 0;
         if (m->_high_priority_tasks.load(butil::memory_order_relaxed) > 0) {
@@ -172,20 +194,27 @@ void* ExecutionQueueBase::_execute_tasks(void* arg) {
             destroy_queue = true;
         }
         // Release TaskNode until uniterated task or last task
-        while (head->next != NULL && head->iterated) {
+        while (head->next.load(butil::memory_order_relaxed) != NULL && head->iterated) {
             TaskNode* saved_head = head;
-            head = head->next;
-            m->return_task_node(saved_head);
+            head = head->next.load(butil::memory_order_relaxed);
+            return_task_node(saved_head, clear_func);
         }
         if (cur_tail == NULL) {
-            for (cur_tail = head; cur_tail->next != NULL; 
-                    cur_tail = cur_tail->next) {}
+            for (cur_tail = head;
+                    cur_tail->next.load(butil::memory_order_relaxed) != NULL;
+                    cur_tail = cur_tail->next.load(butil::memory_order_relaxed)) {}
         }
         // break when no more tasks and head has been executed
         if (!m->_more_tasks(cur_tail, &cur_tail, !head->iterated)) {
             CHECK_EQ(cur_tail, head);
             CHECK(head->iterated);
-            m->return_task_node(head);
+            // NOTE: _more_tasks() has just relinquished ownership of the queue.
+            // If this executor is not the destroying one (destroy_queue ==
+            // false), another executor running the stop_task may already be
+            // recycling this slot and create() may reuse it; therefore use the
+            // cached clear_func instead of reading m->_clear_func here, which
+            // would otherwise race with create() writing _clear_func.
+            return_task_node(head, clear_func);
             break;
         }
     }
@@ -195,12 +224,26 @@ void* ExecutionQueueBase::_execute_tasks(void* arg) {
         // Add _join_butex by 2 to make it equal to the next version of the
         // ExecutionQueue from the same slot so that join with old id would
         // return immediately.
-        // 
+        //
         // 1: release fence to make join sees the newest changes when it sees
         //    the newest _join_butex
+        // Publish this executor's memory effects before bumping _join_butex.
+        // join() has a lock-free fast path (the `while` load below) that may
+        // observe the new value without ever blocking in butex_wait()/futex,
+        // in which case TSan sees no happens-before edge; establish it
+        // explicitly here, paired with BUTIL_TSAN_ACQUIRE() in join().
+        BUTIL_TSAN_RELEASE(m->_join_butex);
         m->_join_butex->fetch_add(2, butil::memory_order_release/*1*/);
         butex_wake_all(m->_join_butex);
         vars->execq_count << -1;
+        // Publish this destroyer's memory effects (including the _clear_func
+        // read in the return_task_node() calls above) before the slot goes
+        // back to the pool, paired with BUTIL_TSAN_ACQUIRE() in create() where
+        // the slot is reused. Without this, the reuse across fibers via
+        // ResourcePool's lock-free local free list carries no happens-before
+        // that TSan can see, so it falsely reports a race on the reused
+        // ExecutionQueueBase memory.
+        BUTIL_TSAN_RELEASE(&m->_clear_func);
         butil::return_resource(slot_of_id(m->_this_id));
     }
     vars->execq_active_count << -1;
@@ -230,7 +273,12 @@ void* ExecutionQueueBase::_execute_tasks_pthread(void* arg) {
 }
 
 void ExecutionQueueBase::return_task_node(TaskNode* node) {
-    node->clear_before_return(_clear_func);
+    return_task_node(node, _clear_func);
+}
+
+void ExecutionQueueBase::return_task_node(TaskNode* node,
+                                          clear_task_mem clear_func) {
+    node->clear_before_return(clear_func);
     butil::return_object<TaskNode>(node);
     get_execq_vars()->running_task_count << -1;
 }
@@ -267,6 +315,13 @@ int ExecutionQueueBase::join(uint64_t id) {
             return errno;
         }
     }
+    // Acquire the memory effects published by the executor's _join_butex bump
+    // (paired with BUTIL_TSAN_RELEASE() in _execute_tasks()). Needed even when
+    // the loop above observed the new version through the lock-free fast path
+    // without blocking in butex_wait(): in that case no futex/atomic edge would
+    // otherwise inform TSan of the happens-before, and it would falsely report
+    // races on memory the executor last touched (e.g. the task meta).
+    BUTIL_TSAN_ACQUIRE(m->_join_butex);
     // Join pthread if it's started.
     if (m->_options.use_pthread && m->_pthread_started) {
         pthread_join(m->_pid, NULL);
@@ -301,7 +356,7 @@ int ExecutionQueueBase::stop() {
 
 int ExecutionQueueBase::_execute(TaskNode* head, bool high_priority, int* niterated) {
     if (head != NULL && head->stop_task) {
-        CHECK(head->next == NULL);
+        CHECK(head->next.load(butil::memory_order_relaxed) == NULL);
         head->iterated = true;
         head->status = TaskNode::EXECUTED;
         TaskIteratorBase iter(NULL, this, true, false);
@@ -393,6 +448,19 @@ int ExecutionQueueBase::create(uint64_t* id, const ExecutionQueueOptions* option
     slot_id_t slot;
     ExecutionQueueBase* const m = butil::get_resource(&slot, Forbidden());
     if (BAIDU_LIKELY(m != NULL)) {
+        // This slot may have just been recycled by another fiber's
+        // _execute_tasks() (see the paired BUTIL_TSAN_RELEASE before
+        // return_resource() below). The reuse travels through ResourcePool's
+        // lock-free local free list, which carries no synchronization TSan can
+        // observe across fibers. Acquire here so the previous owner's last
+        // accesses (e.g. return_task_node() reading _clear_func) are seen as
+        // happening-before the field writes that follow, instead of being
+        // reported as a data race.
+        // Use the address of a non-atomic member (_clear_func, the very field
+        // the race is reported on) as the sync token instead of the object base
+        // (&_head is a hot atomic whose TSan sync object would collide with
+        // ours).
+        BUTIL_TSAN_ACQUIRE(&m->_clear_func);
         m->_execute_func = execute_func;
         m->_clear_func = clear_func;
         m->_meta = meta;
@@ -431,7 +499,7 @@ void TaskIteratorBase::operator++() {
         return;
     }
     if (_cur_node->iterated) {
-        _cur_node = _cur_node->next;
+        _cur_node = _cur_node->next.load(butil::memory_order_relaxed);
     }
     if (should_break_for_high_priority_tasks()) {
         return;
@@ -447,7 +515,7 @@ void TaskIteratorBase::operator++() {
             _num_iterated += !_cur_node->iterated;
             _cur_node->iterated = true;
         }
-        _cur_node = _cur_node->next;
+        _cur_node = _cur_node->next.load(butil::memory_order_relaxed);
     }
     return;
 }
@@ -463,7 +531,7 @@ TaskIteratorBase::~TaskIteratorBase() {
         if (_head->iterated && _head->high_priority == _high_priority) {
             _head->set_executed();
         }
-        _head = _head->next;
+        _head = _head->next.load(butil::memory_order_relaxed);
     }
     if (_should_break && _cur_node != NULL 
             && _cur_node->high_priority == _high_priority && _cur_node->iterated) {
