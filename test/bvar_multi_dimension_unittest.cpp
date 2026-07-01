@@ -19,6 +19,7 @@
 
 #include <pthread.h>
 #include <cstddef>
+#include <atomic>
 #include <memory>
 #include <iostream>
 #include <array>
@@ -611,7 +612,7 @@ TEST_F(MultiDimensionTest, labels) {
 }
 
 std::array<const char*, 3> g_labels_value{"idc", "post", "200"};
-bool g_shared_stop = false;
+butil::atomic<bool> g_shared_stop(false);
 
 void* get_shared_adder_thread(void* arg) {
     auto my_madder =

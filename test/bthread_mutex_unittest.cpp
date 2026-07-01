@@ -28,8 +28,13 @@
 #include "gperftools_helper.h"
 
 namespace {
-inline unsigned* get_butex(bthread_mutex_t & m) {
-    return m.butex;
+// Read the butex value atomically. The mutex's butex is mutated with atomic
+// ops by the lock/unlock fast-paths running on other threads, so a plain
+// `*butex` read in the assertions below would be a (benign but noisy) data
+// race under TSan. Use a relaxed atomic load to observe the value safely.
+inline unsigned get_butex_value(bthread_mutex_t& m) {
+    return ((butil::atomic<unsigned>*)m.butex)->load(
+        butil::memory_order_relaxed);
 }
 
 long start_time = butil::cpuwide_time_ms();
@@ -47,16 +52,21 @@ void* locker(void* arg) {
 TEST(MutexTest, sanity) {
     bthread_mutex_t m;
     ASSERT_EQ(0, bthread_mutex_init(&m, NULL));
-    ASSERT_EQ(0u, *get_butex(m));
+    ASSERT_EQ(0u, get_butex_value(m));
     ASSERT_EQ(0, bthread_mutex_lock(&m));
-    ASSERT_EQ(1u, *get_butex(m));
+    ASSERT_EQ(1u, get_butex_value(m));
     bthread_t th1;
     ASSERT_EQ(0, bthread_start_urgent(&th1, NULL, locker, &m));
-    usleep(5000); // wait for locker to run.
-    ASSERT_EQ(257u, *get_butex(m)); // contention
+    // Wait for locker to contend on the mutex. Poll instead of a fixed sleep:
+    // sanitizers (e.g. TSan) add large runtime overhead, so worker cold-start
+    // and bthread scheduling may take far longer than a few milliseconds.
+    for (int i = 0; i < 1000 && get_butex_value(m) != 257u; ++i) {
+        usleep(1000);
+    }
+    ASSERT_EQ(257u, get_butex_value(m)); // contention
     ASSERT_EQ(0, bthread_mutex_unlock(&m));
     ASSERT_EQ(0, bthread_join(th1, NULL));
-    ASSERT_EQ(0u, *get_butex(m));
+    ASSERT_EQ(0u, get_butex_value(m));
     ASSERT_EQ(0, bthread_mutex_destroy(&m));
 }
 
@@ -70,7 +80,7 @@ TEST(MutexTest, used_in_pthread) {
     for (size_t i = 0; i < ARRAY_SIZE(th); ++i) {
         pthread_join(th[i], NULL);
     }
-    ASSERT_EQ(0u, *get_butex(m));
+    ASSERT_EQ(0u, get_butex_value(m));
     ASSERT_EQ(0, bthread_mutex_destroy(&m));
 }
 
@@ -140,15 +150,15 @@ TEST(MutexTest, cpp_wrapper) {
     mutex.unlock();
 }
 
-bool g_started = false;
-bool g_stopped = false;
+butil::atomic<bool> g_started(false);
+butil::atomic<bool> g_stopped(false);
 
 template <typename Mutex>
 struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
     Mutex* mutex;
     int64_t counter;
     int64_t elapse_ns;
-    bool ready;
+    butil::atomic<bool> ready;
 
     PerfArgs() : mutex(NULL), counter(0), elapse_ns(0), ready(false) {}
 };
@@ -156,16 +166,16 @@ struct BAIDU_CACHELINE_ALIGNMENT PerfArgs {
 template <typename Mutex>
 void* add_with_mutex(void* void_arg) {
     PerfArgs<Mutex>* args = (PerfArgs<Mutex>*)void_arg;
-    args->ready = true;
+    args->ready.store(true, butil::memory_order_relaxed);
     butil::Timer t;
-    while (!g_stopped) {
-        if (g_started) {
+    while (!g_stopped.load(butil::memory_order_relaxed)) {
+        if (g_started.load(butil::memory_order_relaxed)) {
             break;
         }
         bthread_usleep(1000);
     }
     t.start();
-    while (!g_stopped) {
+    while (!g_stopped.load(butil::memory_order_relaxed)) {
         BAIDU_SCOPED_LOCK(*args->mutex);
         ++args->counter;
     }
@@ -183,8 +193,8 @@ void PerfTest(Mutex* mutex,
               int thread_num,
               const ThreadCreateFn& create_fn,
               const ThreadJoinFn& join_fn) {
-    g_started = false;
-    g_stopped = false;
+    g_started.store(false, butil::memory_order_relaxed);
+    g_stopped.store(false, butil::memory_order_relaxed);
     ThreadId threads[thread_num];
     std::vector<PerfArgs<Mutex> > args(thread_num);
     for (int i = 0; i < thread_num; ++i) {
@@ -194,7 +204,7 @@ void PerfTest(Mutex* mutex,
     while (true) {
         bool all_ready = true;
         for (int i = 0; i < thread_num; ++i) {
-            if (!args[i].ready) {
+            if (!args[i].ready.load(butil::memory_order_relaxed)) {
                 all_ready = false;
                 break;
             }
@@ -204,13 +214,13 @@ void PerfTest(Mutex* mutex,
         }
         usleep(1000);
     }
-    g_started = true;
+    g_started.store(true, butil::memory_order_relaxed);
     char prof_name[32];
     snprintf(prof_name, sizeof(prof_name), "mutex_perf_%d.prof", ++g_prof_name_counter);
     ProfilerStart(prof_name);
     usleep(500 * 1000);
     ProfilerStop();
-    g_stopped = true;
+    g_stopped.store(true, butil::memory_order_relaxed);
     int64_t wait_time = 0;
     int64_t count = 0;
     for (int i = 0; i < thread_num; ++i) {
@@ -243,7 +253,7 @@ TEST(MutexTest, performance) {
 template <typename Mutex>
 void* loop_until_stopped(void* arg) {
     auto m = (Mutex*)arg;
-    while (!g_stopped) {
+    while (!g_stopped.load(butil::memory_order_relaxed)) {
         BAIDU_SCOPED_LOCK(*m);
         bthread_usleep(20);
     }
@@ -251,7 +261,7 @@ void* loop_until_stopped(void* arg) {
 }
 
 TEST(MutexTest, mix_thread_types) {
-    g_stopped = false;
+    g_stopped.store(false, butil::memory_order_relaxed);
     const int N = 16;
     const int M = N * 2;
     bthread::Mutex m;
@@ -270,7 +280,7 @@ TEST(MutexTest, mix_thread_types) {
         ASSERT_EQ(0, bthread_start_urgent(&bthreads[i], attr, loop_until_stopped<bthread::Mutex>, &m));
     }
     bthread_usleep(1000L * 1000);
-    g_stopped = true;
+    g_stopped.store(true, butil::memory_order_relaxed);
     for (int i = 0; i < M; ++i) {
         bthread_join(bthreads[i], NULL);
     }
@@ -318,7 +328,7 @@ TEST(MutexTest, fast_pthread_mutex) {
             loop_until_stopped<bthread::FastPthreadMutex>, &mutex));
     }
     bthread_usleep(1000L * 1000);
-    g_stopped = true;
+    g_stopped.store(true, butil::memory_order_relaxed);
     for (int i = 0; i < N; ++i) {
         pthread_join(pthreads[i], NULL);
     }
@@ -360,7 +370,7 @@ TEST(MutexTest, pthread_mutex) {
             loop_until_stopped<pthread_mutex_t>, &mutex));
     }
     bthread_usleep(1000L * 1000);
-    g_stopped = true;
+    g_stopped.store(true, butil::memory_order_relaxed);
     for (int i = 0; i < N; ++i) {
         pthread_join(pthreads[i], NULL);
     }

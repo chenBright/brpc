@@ -275,6 +275,7 @@ TEST_F(BthreadTest, errno_not_changed) {
     ASSERT_EQ(1, errno);
 }
 
+#if !defined(BUTIL_USE_TSAN)
 static long sleep_in_adding_func = 0;
 
 void* adding_func(void* arg) {
@@ -393,6 +394,7 @@ TEST_F(BthreadTest, start_bthreads_frequently) {
     ProfilerStop();
     delete [] counters;
 }
+#endif
 
 void* log_start_latency(void* void_arg) {
     butil::Timer* tm = static_cast<butil::Timer*>(void_arg);
@@ -428,6 +430,9 @@ TEST_F(BthreadTest, start_latency_when_high_idle) {
               << elp2 / REP << "ns";
 }
 
+// This test asserts on elapsed time, which is unreliable and very slow under
+// ThreadSanitizer, so it is disabled when TSan is on.
+#if !defined(BUTIL_USE_TSAN)
 void* sleep_for_awhile_with_sleep(void* arg) {
     bthread_usleep((intptr_t)arg);
     return NULL;
@@ -445,6 +450,7 @@ TEST_F(BthreadTest, stop_sleep) {
     tm.stop();
     ASSERT_LE(labs(tm.m_elapsed() - 10), 10);
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(BthreadTest, bthread_exit) {
     bthread_t th1;
@@ -532,7 +538,7 @@ TEST_F(BthreadTest, bthread_usleep) {
 }
 
 static const bthread_attr_t BTHREAD_ATTR_NORMAL_WITH_SPAN =
-{ BTHREAD_STACKTYPE_NORMAL, BTHREAD_INHERIT_SPAN, NULL, BTHREAD_TAG_INVALID };
+{ BTHREAD_STACKTYPE_NORMAL, BTHREAD_INHERIT_SPAN, NULL, BTHREAD_TAG_INVALID, "" };
 
 void* test_parent_span(void* p) {
     uint64_t *q = (uint64_t *)p;
@@ -614,6 +620,7 @@ TEST_F(BthreadTest, test_span) {
     ASSERT_EQ(0, bthread_set_span_funcs(NULL, NULL, NULL));
 }
 
+#if !defined(BUTIL_USE_TSAN)
 void* dummy_thread(void*) {
     return NULL;
 }
@@ -625,6 +632,7 @@ TEST_F(BthreadTest, too_many_nosignal_threads) {
         ASSERT_EQ(0, bthread_start_urgent(&tid, &attr, dummy_thread, NULL));
     }
 }
+#endif
 
 static void* yield_thread(void*) {
     bthread_yield();
@@ -664,7 +672,9 @@ void spin_and_log_trace() {
             break;
         }
     }
+#ifndef BUTIL_USE_TSAN
     ASSERT_TRUE(ok);
+#endif
 }
 
 void repeated_sleep_trace() {
@@ -681,22 +691,26 @@ void repeated_sleep_trace() {
         std::string st1 = bthread::stack_trace(th);
         LOG(INFO) << "repeated_sleep stack trace:\n" << st1;
         ok = st1.find("repeated_sleep") != std::string::npos;
-
         stop = true;
         ASSERT_EQ(0, bthread_join(th, NULL));
 
         std::string st2 = bthread::stack_trace(th);
         LOG(INFO) << "ended bthread stack trace:\n" << st2;
         ASSERT_NE(std::string::npos, st2.find("not exist now"));
-
         if (ok) {
             break;
         }
     }
+#ifndef BUTIL_USE_TSAN
     ASSERT_TRUE(ok);
+#endif
 }
 
 TEST_F(BthreadTest, trace) {
+// #ifdef BUTIL_USE_TSAN
+    // GTEST_SKIP() << "worker growth is too slow under TSan to reach max "
+                    // "concurrency within the test's timing window";
+// #endif
     spin_and_log_trace();
     repeated_sleep_trace();
 }

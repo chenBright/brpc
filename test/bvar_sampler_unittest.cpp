@@ -19,6 +19,7 @@
 #include "bvar/detail/sampler.h"
 #include "butil/time.h"
 #include "butil/logging.h"
+#include "butil/atomicops.h"
 #include <gtest/gtest.h>
 
 namespace {
@@ -53,17 +54,20 @@ class DebugSampler : public bvar::detail::Sampler {
 public:
     DebugSampler() : _ncalled(0) {}
     ~DebugSampler() {
-        ++_s_ndestroy;
+        _s_ndestroy.fetch_add(1, butil::memory_order_relaxed);
     }
     void take_sample() {
-        ++_ncalled;
+        _ncalled.fetch_add(1, butil::memory_order_relaxed);
     }
-    int called_count() const { return _ncalled; }
+    int called_count() const {
+        return _ncalled.load(butil::memory_order_relaxed);
+    }
 private:
-    int _ncalled;
-    static int _s_ndestroy;
+    butil::atomic<int> _ncalled;
+public:
+    static butil::atomic<int> _s_ndestroy;
 };
-int DebugSampler::_s_ndestroy = 0;
+butil::atomic<int> DebugSampler::_s_ndestroy(0);
 
 TEST(SamplerTest, single_threaded) {
 #if !BRPC_WITH_GLOG
@@ -81,12 +85,12 @@ TEST(SamplerTest, single_threaded) {
         // LE: called once every second, may be called more than once
         ASSERT_LE(1, s[i]->called_count()) << "i=" << i;
     }
-    EXPECT_EQ(0, DebugSampler::_s_ndestroy);
+    EXPECT_EQ(0, DebugSampler::_s_ndestroy.load(butil::memory_order_relaxed));
     for (int i = 0; i < N; ++i) {
         s[i]->destroy();
     }
     usleep(1010000);
-    EXPECT_EQ(N, DebugSampler::_s_ndestroy);
+    EXPECT_EQ(N, DebugSampler::_s_ndestroy.load(butil::memory_order_relaxed));
 #if !BRPC_WITH_GLOG
     ASSERT_EQ(&log_str, logging::SetLogSink(old_sink));
     if (log_str.find("Removed ") != std::string::npos) {
@@ -119,7 +123,7 @@ TEST(SamplerTest, multi_threaded) {
     logging::LogSink* old_sink = logging::SetLogSink(&log_str);
 #endif
     pthread_t th[10];
-    DebugSampler::_s_ndestroy = 0;
+    DebugSampler::_s_ndestroy.store(0, butil::memory_order_relaxed);
     for (size_t i = 0; i < arraysize(th); ++i) {
         ASSERT_EQ(0, pthread_create(&th[i], NULL, check, NULL));
     }
@@ -127,7 +131,8 @@ TEST(SamplerTest, multi_threaded) {
         ASSERT_EQ(0, pthread_join(th[i], NULL));
     }
     sleep(1);
-    EXPECT_EQ(100 * arraysize(th), (size_t)DebugSampler::_s_ndestroy);
+    EXPECT_EQ(100 * arraysize(th),
+              (size_t)DebugSampler::_s_ndestroy.load(butil::memory_order_relaxed));
 #if !BRPC_WITH_GLOG
     ASSERT_EQ(&log_str, logging::SetLogSink(old_sink));
     if (log_str.find("Removed ") != std::string::npos) {

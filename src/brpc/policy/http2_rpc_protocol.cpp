@@ -20,6 +20,7 @@
 #include "brpc/details/controller_private_accessor.h"
 #include "brpc/server.h"
 #include "butil/base64.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ACQUIRE / BUTIL_TSAN_RELEASE
 #include "brpc/log.h"
 
 namespace brpc {
@@ -1048,7 +1049,8 @@ void H2Context::Describe(std::ostream& os, const DescribeOptions& opt) const {
     const char sep = (opt.verbose ? '\n' : ' ');
     os << "conn_state=" << H2ConnectionState2Str(_conn_state);
     os << sep << "last_received_stream_id=" << _last_received_stream_id
-       << sep << "last_sent_stream_id=" << _last_sent_stream_id;
+       << sep << "last_sent_stream_id="
+       << _last_sent_stream_id.load(butil::memory_order_relaxed);
     os << sep << "deferred_window_update="
        << _deferred_window_update.load(butil::memory_order_relaxed)
        << sep << "remote_conn_window_left="
@@ -1579,6 +1581,17 @@ H2UnsentRequest::AppendAndDestroySelf(butil::IOBuf* out, Socket* socket) {
         options.index_policy = HPACK_NEVER_INDEX_HEADER;
     }
     
+    // hpacker is shared by all RPCs on this connection and HPacker::Encode
+    // mutates its dynamic index table. However the socket write model
+    // guarantees that AppendAndDestroySelf()/Setup() runs on only one thread at
+    // any moment, so accesses to hpacker are already serialized and no extra
+    // lock is needed. The serialization is carried by the lock-free
+    // Socket::_write_head hand-off whose memory ordering TSan cannot follow,
+    // which makes TSan falsely report a data race here. Use the hpacker address
+    // as a happens-before carrier to teach TSan about the existing
+    // serialization: the previous encoder RELEASEs after encoding and the next
+    // one ACQUIREs before encoding.
+    BUTIL_TSAN_ACQUIRE(&hpacker);
     for (size_t i = 0; i < _size; ++i) {
         hpacker.Encode(&appender, _list[i], options);
     }
@@ -1590,6 +1603,7 @@ H2UnsentRequest::AppendAndDestroySelf(butil::IOBuf* out, Socket* socket) {
             hpacker.Encode(&appender, header, options);
         }
     }
+    BUTIL_TSAN_RELEASE(&hpacker);
     butil::IOBuf frag;
     appender.move_to(frag);
     butil::IOBuf dummy_buf;
@@ -1724,6 +1738,19 @@ H2UnsentResponse::AppendAndDestroySelf(butil::IOBuf* out, Socket* socket) {
         options.index_policy = HPACK_NEVER_INDEX_HEADER;
     }
 
+    // hpacker is shared by all RPCs on this connection and HPacker::Encode
+    // mutates its dynamic index table. However the socket write model
+    // guarantees that AppendAndDestroySelf()/Setup() runs on only one thread at
+    // any moment, so accesses to hpacker are already serialized and no extra
+    // lock is needed. The serialization is carried by the lock-free
+    // Socket::_write_head hand-off whose memory ordering TSan cannot follow,
+    // which makes TSan falsely report a data race here. Use the hpacker address
+    // as a happens-before carrier to teach TSan about the existing
+    // serialization: the previous encoder RELEASEs after encoding and the next
+    // one ACQUIREs before encoding.
+    butil::IOBuf frag;
+    butil::IOBuf trailer_frag;
+    BUTIL_TSAN_ACQUIRE(&hpacker);
     for (size_t i = 0; i < _size; ++i) {
         hpacker.Encode(&appender, _list[i], options);
     }
@@ -1734,10 +1761,8 @@ H2UnsentResponse::AppendAndDestroySelf(butil::IOBuf* out, Socket* socket) {
             hpacker.Encode(&appender, header, options);
         }
     }
-    butil::IOBuf frag;
     appender.move_to(frag);
 
-    butil::IOBuf trailer_frag;
     if (_is_grpc) {
         HPacker::Header status_header("grpc-status",
                                       butil::string_printf("%d", _grpc_status));
@@ -1748,6 +1773,7 @@ H2UnsentResponse::AppendAndDestroySelf(butil::IOBuf* out, Socket* socket) {
         }
         appender.move_to(trailer_frag);
     }
+    BUTIL_TSAN_RELEASE(&hpacker);
 
     PackH2Message(out, frag, trailer_frag, _data, _stream_id, ctx);
     return butil::Status::OK();

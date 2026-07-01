@@ -16,7 +16,12 @@
 // Death tests on Android are currently very flaky. No need to add more flaky
 // tests, as they just make it hard to spot real problems.
 // TODO(markus): See if the restrictions on Android can eventually be lifted.
-#if defined(GTEST_HAS_DEATH_TEST) && !defined(OS_ANDROID)
+//
+// Death tests use fork() in a multi-threaded context. Under ThreadSanitizer,
+// starting new threads after a multi-threaded fork is not supported, so the
+// child process dies with a tsan error instead of the expected CHECK message,
+// making the death tests fail. Disable them in tsan builds.
+#if defined(GTEST_HAS_DEATH_TEST) && !defined(OS_ANDROID) && !defined(BUTIL_USE_TSAN)
 #define ALLOW_DEATH_TEST
 #endif
 

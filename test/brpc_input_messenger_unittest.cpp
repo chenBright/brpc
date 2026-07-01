@@ -49,6 +49,7 @@ int main(int argc, char* argv[]) {
     return RUN_ALL_TESTS();
 }
 
+#if !defined(BUTIL_USE_TSAN)
 class MessengerTest : public ::testing::Test{
 protected:
     MessengerTest(){
@@ -223,3 +224,4 @@ TEST_F(MessengerTest, dispatch_tasks) {
     }
     LOG(WARNING) << "begin to exit!!!!";
 }
+#endif

@@ -30,6 +30,8 @@
 #include "butil/fd_utility.h"
 #include "butil/debug/leak_annotations.h"
 #include <butil/fd_guard.h>
+#include "butil/synchronization/lock.h"
+#include "butil/scoped_lock.h"
 #include "bthread/unstable.h"
 #include "bthread/task_control.h"
 #include "brpc/socket.h"
@@ -312,6 +314,10 @@ public:
                       void (*done)(int err, void* data),
                       void* data) {
         LOG(INFO) << "Start application-level connect";
+        // StartConnect is called in another bthread while the members are
+        // read by the main thread. Protect them with a mutex to establish a
+        // happens-before relationship and avoid data races (reported by TSAN).
+        BAIDU_SCOPED_LOCK(_mutex);
         _done = done;
         _data = data;
         _called_start_connect = true;
@@ -320,15 +326,30 @@ public:
         LOG(INFO) << "Stop application-level connect";
     }
     void MakeConnectDone() {
-        _done(0, _data);
+        void (*done)(int err, void* data) = NULL;
+        void* data = NULL;
+        {
+            BAIDU_SCOPED_LOCK(_mutex);
+            done = _done;
+            data = _data;
+        }
+        done(0, data);
     }
-    bool is_start_connect_called() const { return _called_start_connect; }
+    bool is_start_connect_called() const {
+        BAIDU_SCOPED_LOCK(_mutex);
+        return _called_start_connect;
+    }
 private:
+    mutable butil::Mutex _mutex;
     void (*_done)(int err, void* data);
     void* _data;
-    bool _called_start_connect; 
+    bool _called_start_connect;
 };
 
+// This test asserts operations finish within a cpuwide_time deadline, which is
+// unreliable and very slow under ThreadSanitizer, so it is disabled when TSan
+// is on.
+#ifndef BUTIL_USE_TSAN
 TEST_F(SocketTest, single_threaded_connect_and_write) {
     // FIXME(gejun): Messenger has to be new otherwise quitting may crash.
     // It is intentionally never deleted; mark it so it is not a reported leak.
@@ -440,6 +461,7 @@ TEST_F(SocketTest, single_threaded_connect_and_write) {
     ASSERT_EQ(butil::EndPoint(), s->local_side());
     ASSERT_EQ(point, s->remote_side());
 }
+#endif // BUTIL_USE_TSAN
 
 #define NUMBER_WIDTH 16
 
@@ -475,6 +497,10 @@ void* FailedWriter(void* void_arg) {
     return NULL;
 }
 
+// These tests assert operations finish within a cpuwide_time deadline, which is
+// unreliable and very slow under ThreadSanitizer, so they are disabled when
+// TSan is on.
+#ifndef BUTIL_USE_TSAN
 TEST_F(SocketTest, fail_to_connect) {
     const size_t REP = 10;
     butil::EndPoint point(butil::IP_ANY, 7563/*not listened*/);
@@ -578,6 +604,7 @@ TEST_F(SocketTest, not_health_check_when_nref_hits_0) {
     }
     ASSERT_EQ(-1, brpc::Socket::Status(id));
 }
+#endif // BUTIL_USE_TSAN
 
 class HealthCheckTestServiceImpl : public test::HealthCheckTestService {
 public:
@@ -591,14 +618,16 @@ public:
                                 google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
         brpc::Controller* cntl = (brpc::Controller*)cntl_base;
-        if (_sleep_flag) {
+        if (_sleep_flag.load(butil::memory_order_relaxed)) {
             bthread_usleep(510000 /* 510ms, a little bit longer than the default
                                      timeout of health check rpc */);
         }
         cntl->response_attachment().append("OK");
     }
 
-    bool _sleep_flag;
+    // Accessed by the rpc-handling bthread and the main thread concurrently,
+    // use an atomic to avoid data race (reported by TSAN).
+    butil::atomic<bool> _sleep_flag;
 };
 
 TEST_F(SocketTest, app_level_health_check) {
@@ -645,7 +674,7 @@ TEST_F(SocketTest, app_level_health_check) {
         ASSERT_EQ(EHOSTDOWN, cntl.ErrorCode());
         bthread_usleep(1000000 /*1s*/);
     }
-    hc_service._sleep_flag = false;
+    hc_service._sleep_flag.store(false, butil::memory_order_relaxed);
     bthread_usleep(2000000 /* a little bit longer than hc rpc timeout + hc interval */);
     // should recover now
     {
@@ -662,6 +691,10 @@ TEST_F(SocketTest, app_level_health_check) {
     GFLAGS_NAMESPACE::SetCommandLineOption("health_check_interval", hc_buf);
 }
 
+// This test (and the multi-threaded write tests below) assert operations
+// finish within a cpuwide_time deadline, which is unreliable and very slow
+// under ThreadSanitizer, so they are disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 TEST_F(SocketTest, health_check) {
     // FIXME(gejun): Messenger has to be new otherwise quitting may crash.
     // It is intentionally never deleted; mark it so it is not a reported leak.
@@ -969,6 +1002,7 @@ void* FastWriter(void* void_arg) {
            (long)total_time * 1000/ c, (long)c, (long)nretry);
     return NULL;
 }
+#endif
 
 struct ReaderArg {
     int fd;
@@ -994,6 +1028,7 @@ void* reader(void* void_arg) {
     return NULL;
 }
 
+#ifndef BUTIL_USE_TSAN
 TEST_F(SocketTest, multi_threaded_write_perf) {
     const size_t REP = 1000000000;
     int fds[2];
@@ -1053,6 +1088,7 @@ TEST_F(SocketTest, multi_threaded_write_perf) {
     ASSERT_EQ((brpc::Socket*)NULL, global_sock);
     close(fds[0]);
 }
+#endif
 
 void GetKeepaliveValue(int fd,
                        int& keepalive,

@@ -30,6 +30,7 @@
 #include "butil/fd_utility.h"
 #include "butil/memory/scope_guard.h"
 #include "butil/reloadable_flags.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ACQUIRE/RELEASE
 #include "absl/debugging/stacktrace.h"
 #include "absl/debugging/symbolize.h"
 
@@ -354,10 +355,27 @@ void TaskTracer::SignalHandler(int, siginfo_t* info, void* context) {
         // The signal is not from Tracer, such as TaskControl, do nothing.
         return;
     }
+
+    // The happens-before edge from SignalTrace() to this handler is carried by
+    // signal delivery (pthread_sigqueue -> signal handler), which TSan cannot
+    // model. Acquire the SignalSync here, paired with BUTIL_TSAN_RELEASE() in
+    // SignalTrace() before pthread_sigqueue(), so that this handler's reads of
+    // the SignalSync (pipe_fds) and writes to `result' are not falsely reported
+    // as racing with the initialization in SignalTrace(). No-op without TSan.
+    BUTIL_TSAN_ACQUIRE(signal_sync.get());
+
     // Skip the first frame, which is the signal handler itself.
     signal_sync->result.frame_count = absl::DefaultStackUnwinder(signal_sync->result.ips, NULL,
                                                                 arraysize(signal_sync->result.ips), 1,
                                                                 context, NULL);
+
+    // Publish `result' to SignalTrace(). The happens-before edge back to the
+    // tracing thread is carried by the self-pipe (this write() paired with
+    // poll() in SignalTrace()), which TSan cannot model because poll() does not
+    // consume the pipe. Release here, paired with BUTIL_TSAN_ACQUIRE() after
+    // the poll() returns. No-op without TSan.
+    BUTIL_TSAN_RELEASE(signal_sync.get());
+
     // write() is async-signal-safe.
     // Don't care about the return value.
     butil::ignore_result(write(signal_sync->pipe_fds[1], "1", 1));
@@ -412,6 +430,12 @@ TaskTracer::Result TaskTracer::SignalTrace(pthread_t worker_tid) {
     // Add reference for SignalHandler.
     signal_sync->AddRefManually();
 
+    // Publish the fully-initialized SignalSync to the signal handler. The
+    // happens-before edge is carried by signal delivery (pthread_sigqueue ->
+    // SignalHandler), which TSan cannot model. Paired with BUTIL_TSAN_ACQUIRE()
+    // at the beginning of SignalHandler(). No-op without TSan.
+    BUTIL_TSAN_RELEASE(signal_sync.get());
+
     sigval value{};
     value.sival_ptr = signal_sync.get();
     size_t sigqueue_try = 0;
@@ -453,6 +477,12 @@ TaskTracer::Result TaskTracer::SignalTrace(pthread_t worker_tid) {
         }
         break;
     }
+
+    // Acquire `result' published by SignalHandler before reading it. The
+    // happens-before edge is carried by the self-pipe (write() in the handler
+    // observed by poll() above), which TSan cannot model. Paired with
+    // BUTIL_TSAN_RELEASE() in SignalHandler(). No-op without TSan.
+    BUTIL_TSAN_ACQUIRE(signal_sync.get());
 
     return signal_sync->result;
 }

@@ -27,6 +27,7 @@
 #include "gperftools_helper.h"
 #include "butil/time.h"
 #include "butil/macros.h"
+#include "butil/atomicops.h"
 #include "butil/fd_utility.h"
 #include <butil/endpoint.h>
 #include <butil/fd_guard.h>
@@ -67,7 +68,10 @@ TEST(FDTest, read_kernel_version) {
 //#define RUN_EPOLL_IN_BTHREAD 1
 //#define CREATE_THREAD_TO_PROCESS 1
 
-volatile bool stop = false;
+// `stop' is written by the main test thread and read by epoll_thread()
+// concurrently. Use an atomic to avoid a data race (volatile does not provide
+// inter-thread synchronization).
+butil::atomic<bool> stop(false);
 
 struct SocketMeta {
     int fd;
@@ -446,6 +450,9 @@ TEST(FDTest, interrupt_pthread) {
     pthread_join(th2, NULL);
 }
 
+// The following tests assert on elapsed time, which is unreliable and very
+// slow under ThreadSanitizer, so they are disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 void* close_the_fd(void* arg) {
     bthread_usleep(10000/*10ms*/);
     EXPECT_EQ(0, bthread_close(*(int*)arg));
@@ -538,6 +545,7 @@ TEST(FDTest, close_should_wakeup_waiter) {
 
     ASSERT_EQ(0, bthread_close(fds[1]));
 }
+#endif // BUTIL_USE_TSAN
 
 TEST(FDTest, close_definitely_invalid) {
     int ec = 0;

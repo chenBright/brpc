@@ -29,6 +29,7 @@
 #include "bthread/stack.h"           // ContextualStack
 #include "bthread/timer_thread.h"
 #include "butil/thread_local.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 namespace bthread {
 
@@ -130,6 +131,45 @@ public:
         version_butex = butex_create_checked<uint32_t>();
         *version_butex = 1;
         pthread_mutex_init(&trace_lock, NULL);
+        // `interrupted` is intentionally raced on: TaskGroup::interrupt()
+        // (interrupt_and_consume_waiters) writes it under version_lock, while
+        // butex_wait_from_pthread()/wait_for_butex() read and clear it under
+        // the butex's waiter_lock -- two different locks on purpose. An
+        // interruption is "persistent", so consuming it zero or multiple times
+        // is harmless (see the "Race with set ... which are OK" comment in
+        // butex_wait_from_pthread). The TaskMeta object lives in a ResourcePool
+        // and is never freed, so annotating it once at construction covers its
+        // whole lifetime. Mark it benign so TSan stops reporting this design.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &interrupted, sizeof(interrupted),
+            "benign TaskMeta::interrupted (version_lock vs waiter_lock)");
+        // `stat` is intentionally raced on: TaskGroup::sched_to() writes
+        // stat.cputime_ns, stat.cpu_usage_ns, and stat.nswitch without holding
+        // any lock (only the current worker thread can write to its own task's
+        // stat). Meanwhile, print_task() reads stat under version_lock. This is
+        // benign because: (1) stat is only written by the task's own worker
+        // thread in sched_to(), (2) reads in print_task() are protected by
+        // version_lock to ensure version consistency, (3) occasional stale reads
+        // of stat fields are harmless for diagnostic purposes. The TaskMeta
+        // object lives in a ResourcePool and is never freed, so annotating it
+        // once at construction covers its whole lifetime.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &stat, sizeof(stat),
+            "benign TaskMeta::stat (sched_to write vs print_task read)");
+        // `fn` is intentionally raced on: TaskGroup::init() and the bthread
+        // creation path write it without holding any lock (the TaskMeta is
+        // freshly fetched from the ResourcePool and initialized by a single
+        // worker thread). Meanwhile, the diagnostic interfaces
+        // get_living_bthreads()/print_task() scan the whole ResourcePool and
+        // read `fn` (to filter out internal main-task bthreads) without any
+        // lock. This is benign because the read is best-effort for diagnostics
+        // only: an occasional stale/half-initialized value merely affects
+        // whether a bthread shows up once in the listing, which is harmless.
+        // The TaskMeta object lives in a ResourcePool and is never freed, so
+        // annotating it once at construction covers its whole lifetime.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &fn, sizeof(fn),
+            "benign TaskMeta::fn (init write vs get_living_bthreads read)");
     }
         
     ~TaskMeta() {

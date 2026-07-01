@@ -24,6 +24,7 @@
 
 #include "butil/object_pool.h"
 #include "butil/type_traits.h"
+#include "butil/compiler_specific.h"
 #include "butil/memory/manual_constructor.h"
 
 namespace butil {
@@ -107,7 +108,13 @@ void MPSCQueue<T, Alloc>::Enqueue(T&& data) {
     EnqueueImpl(node);
 }
 
+// The lock-free linking of `next` between producers and the single consumer
+// relies on the `UNCONNECTED` spin-wait protocol in ReverseList() rather than
+// on acquire/release ordering of the `next` field itself, which ThreadSanitizer
+// cannot reason about and reports as benign data races. Exempt this function
+// from TSan instrumentation.
 template <typename T, typename Alloc>
+BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
 void MPSCQueue<T, Alloc>::EnqueueImpl(MPSCQueueNode<T>* node) {
     MPSCQueueNode<T>* prev = _head.exchange(node, memory_order_release);
     if (prev) {
@@ -123,7 +130,11 @@ bool MPSCQueue<T, Alloc>::Dequeue(T& data) {
     return DequeueImpl(&data);
 }
 
+// See the note on EnqueueImpl(): the consumer reads node fields published by
+// producers through the lock-free protocol, which TSan flags as benign data
+// races. Exempt this function from TSan instrumentation.
 template <typename T, typename Alloc>
+BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
 bool MPSCQueue<T, Alloc>::DequeueImpl(T* data) {
     MPSCQueueNode<T>* node;
     if (_cur_dequeue_node) {
@@ -149,7 +160,12 @@ bool MPSCQueue<T, Alloc>::DequeueImpl(T* data) {
     return true;
 }
 
+// See the note on EnqueueImpl(): the spin-wait on `next == UNCONNECTED` and the
+// subsequent list reversal race with concurrent producers at the memory-model
+// level (the `next` field is non-atomic on purpose), which TSan flags as benign
+// data races. Exempt this function from TSan instrumentation.
 template <typename T, typename Alloc>
+BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
 void MPSCQueue<T, Alloc>::ReverseList(MPSCQueueNode<T>* old_head) {
     // Try to set _write_head to NULL to mark that it is done.
     MPSCQueueNode<T>* new_head = old_head;

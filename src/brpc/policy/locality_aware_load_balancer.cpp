@@ -561,6 +561,17 @@ LocalityAwareLoadBalancer::Weight::Weight(int64_t initial_weight)
 LocalityAwareLoadBalancer::Weight::~Weight() {
 }
 
+// Defined out-of-line and marked NOINLINE on purpose: _weight is read here
+// without holding _mutex (from the hot path SelectServer) while it may be
+// modified under _mutex elsewhere. The race is intentional and benign (the
+// selection algorithm tolerates inconsistent weights), so this read-only
+// accessor is exempted from TSan. Keeping it a real, non-inlined function
+// guarantees the no_sanitize_thread attribute is not dropped by inlining.
+BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD NOINLINE
+int64_t LocalityAwareLoadBalancer::Weight::volatile_value() const {
+    return _weight;
+}
+
 int64_t LocalityAwareLoadBalancer::Weight::Disable() {
     BAIDU_SCOPED_LOCK(_mutex);
     const int64_t saved = _weight;

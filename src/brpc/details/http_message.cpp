@@ -23,6 +23,7 @@
 #include "butil/scoped_lock.h"
 #include "butil/endpoint.h"
 #include "butil/base64.h"
+#include "butil/debug/thread_annotations.h"   // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "bthread/bthread.h"                    // bthread_usleep
 #include "brpc/log.h"
 #include "brpc/reloadable_flags.h"
@@ -442,6 +443,19 @@ HttpMessage::HttpMessage(bool read_body_progressively,
     http_parser_init(&_parser, HTTP_BOTH);
     _parser.allow_chunked_length = 1;
     _parser.data = this;
+    // `_stage' is advanced by the http_parser callbacks (e.g. OnBody) without
+    // holding `_body_mutex', while SetBodyReader(), which may run on another
+    // thread, reads it under `_body_mutex'. The race is benign: SetBodyReader()
+    // only uses `_stage' to tell whether the body is still being received
+    // (`_stage <= HTTP_ON_BODY') from the already-completed case; the real
+    // body state is guarded by `_body_mutex' together with `_body' and
+    // `_body_reader', and the transition to HTTP_ON_MESSAGE_COMPLETE is written
+    // under the same lock. An occasional stale read of `_stage' picks the same
+    // branch, so annotate it as a benign race to silence ThreadSanitizer.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_stage, sizeof(_stage),
+        "HttpMessage::_stage is updated by parser callbacks without lock and "
+        "read in SetBodyReader(); the mismatch is benign");
 }
 
 HttpMessage::~HttpMessage() {

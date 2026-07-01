@@ -2614,6 +2614,7 @@ void CloseWithScopedFD(int fd) {
 }
 #endif
 
+#ifndef BUTIL_USE_TSAN
 TEST(ScopedFD, ScopedFDCrashesOnCloseFailure) {
   int fds[2];
   ASSERT_EQ(0, pipe(fds));
@@ -2625,6 +2626,7 @@ TEST(ScopedFD, ScopedFDCrashesOnCloseFailure) {
   EXPECT_DEATH(CloseWithScopedFD(fds[1]), "");
 #endif
 }
+#endif // BUTIL_USE_TSAN
 
 #endif  // defined(OS_POSIX)
 

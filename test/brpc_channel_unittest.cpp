@@ -2225,7 +2225,7 @@ protected:
     brpc::Server _dummy;
     std::string _mock_fail_str;
 
-    bool _close_fd_once;
+    butil::atomic<bool> _close_fd_once;
     
     MyEchoService _svc;
     BackupRequestPolicyImpl _backup_request_policy;
@@ -2604,6 +2604,10 @@ TEST_F(ChannelTest, connection_failed_selective) {
     }
 }
 
+// These tests assert on RPC latency (operation must finish within ~100ms),
+// which is unreliable and very slow under ThreadSanitizer, so they are
+// disabled when TSan is on.
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(ChannelTest, success) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
@@ -2673,6 +2677,7 @@ TEST_F(ChannelTest, success_limit_parallel) {
         }
     }
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(ChannelTest, cancel_before_callmethod) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
@@ -2704,6 +2709,9 @@ TEST_F(ChannelTest, cancel_before_callmethod_selective) {
     }
 }
 
+// These tests assert on RPC cancel latency, which is unreliable and very slow
+// under ThreadSanitizer, so they are disabled when TSan is on.
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(ChannelTest, cancel_during_callmethod) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
@@ -2733,6 +2741,7 @@ TEST_F(ChannelTest, cancel_during_callmethod_selective) {
         }
     }
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(ChannelTest, cancel_after_callmethod) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
@@ -2784,6 +2793,9 @@ TEST_F(ChannelTest, request_not_init_selective) {
     }
 }
 
+// These tests assert on RPC timeout latency, which is unreliable and very slow
+// under ThreadSanitizer, so they are disabled when TSan is on.
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(ChannelTest, timeout) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
@@ -2823,6 +2835,7 @@ TEST_F(ChannelTest, timeout_selective) {
         }
     }
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(ChannelTest, backuprequest_selective) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
@@ -2928,6 +2941,9 @@ TEST_F(ChannelTest, authentication_selective) {
     }
 }
 
+// This test asserts on RPC latency, which is unreliable and very slow under
+// ThreadSanitizer, so it is disabled when TSan is on.
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(ChannelTest, retry) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer 
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
@@ -2937,6 +2953,7 @@ TEST_F(ChannelTest, retry) {
         }
     }
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(ChannelTest, retry_other_servers) {
     for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
@@ -2969,6 +2986,10 @@ TEST_F(ChannelTest, retry_backoff) {
     }
 }
 
+// These tests assert on RPC latency, which is unreliable and very slow under
+// ThreadSanitizer, so they are disabled when TSan is on. The block continues
+// into the multi-threaded stress tests below which are also TSan-disabled.
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(ChannelTest, backup_request) {
     for (int i = 0; i <= 1; ++i) { // Flag SingleServer
         for (int j = 0; j <= 1; ++j) { // Flag Asynchronous
@@ -3061,7 +3082,11 @@ TEST_F(ChannelTest, multiple_threads_multiple_channels) {
         }
     }
 }
+#endif
 
+// These tests assert on RPC latency, which is unreliable and very slow under
+// ThreadSanitizer, so they are disabled when TSan is on.
+#if !defined(BUTIL_USE_TSAN)
 TEST_F(ChannelTest, clear_attachment_after_retry) {
     for (int j = 0; j <= 1; ++j) {
         for (int k = 0; k <= 1; ++k) {
@@ -3093,6 +3118,7 @@ TEST_F(ChannelTest, destroy_channel_selective) {
         }
     }
 }
+#endif // BUTIL_USE_TSAN
 
 TEST_F(ChannelTest, sizeof) {
     LOG(INFO) << "Size of Channel is " << sizeof(brpc::Channel)

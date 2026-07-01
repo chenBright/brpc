@@ -22,6 +22,7 @@
 #include "butil/time.h"
 #include "butil/scoped_lock.h"
 #include "butil/logging.h"
+#include "butil/compiler_specific.h"
 #include "butil/debug/leak_annotations.h"
 #include "brpc/log.h"
 #include "brpc/protocol.h"
@@ -301,27 +302,33 @@ void SocketMap::RemoveInternal(const SocketMapKey& key,
         --sc->ref_count;
     }
     if (sc->ref_count == 0) {
-        // NOTE: save the gflag which may be reloaded at any time
-        const int defer_close_second = _options.defer_close_second_dynamic ?
-            *_options.defer_close_second_dynamic
-            : _options.defer_close_second;
-        if (!remove_orphan && defer_close_second > 0) {
-            const int64_t now_us = butil::cpuwide_time_us();
-            // NOTE: save the gflag which may be reloaded at any time
-            const bool defer_close_respect_idle = _options.defer_close_respect_idle_dynamic ?
-            *_options.defer_close_respect_idle_dynamic : false;
-            if (!defer_close_respect_idle) {
-                // Start count down on this Socket.
-                sc->no_ref_us = now_us;
-                return;
-            }
-            const int64_t defer_us = (int64_t)defer_close_second * 1000000L;
-            if (sc->no_ref_us <= sc->socket->last_active_time_us() + defer_us) {
-                // When defer_close_respect_idle is enabled, a connection that has
-                // already been idle for longer than defer_close_second is closed
-                // immediately.
-                sc->no_ref_us = now_us;
-                return;
+        // NOTE: only read the reloadable gflags on the non-orphan path. The
+        // orphan path (called from the background WatchConnections thread) does
+        // not need them, and reading them here would race with a concurrent
+        // gflag reload.
+        if (!remove_orphan) {
+            // NOTE: save the gflag which may be reloaded at any time.
+            const int defer_close_second = _options.defer_close_second_dynamic ?
+                *_options.defer_close_second_dynamic
+                : _options.defer_close_second;
+            if (defer_close_second > 0) {
+                const int64_t now_us = butil::cpuwide_time_us();
+                // NOTE: save the gflag which may be reloaded at any time
+                const bool defer_close_respect_idle = _options.defer_close_respect_idle_dynamic ?
+                    *_options.defer_close_respect_idle_dynamic : false;
+                if (!defer_close_respect_idle) {
+                    // Start count down on this Socket.
+                    sc->no_ref_us = now_us;
+                    return;
+                }
+                const int64_t defer_us = (int64_t)defer_close_second * 1000000L;
+                if (sc->no_ref_us <= sc->socket->last_active_time_us() + defer_us) {
+                    // When defer_close_respect_idle is enabled, a connection that has
+                    // already been idle for longer than defer_close_second is closed
+                    // immediately.
+                    sc->no_ref_us = now_us;
+                    return;
+                }
             }
         }
         Socket* const s = sc->socket;
@@ -384,6 +391,14 @@ void* SocketMap::RunWatchConnections(void* arg) {
     return NULL;
 }
 
+// This function reads reloadable gflags (idle_timeout_second /
+// defer_close_second) without synchronization while another thread may reload
+// them by assigning to the FLAGS_* variable. The race is benign because an
+// aligned 32-bit access is atomic on supported architectures, but it is
+// reported by ThreadSanitizer. Mark the whole function no_sanitize_thread to
+// suppress these false positives. NOINLINE keeps the attribute from being
+// dropped if the function were inlined into its caller.
+BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD NOINLINE
 void SocketMap::WatchConnections() {
     // This bthread of SocketMap Singleton runs for the whole process lifetime and
     // never returns, so the local objects below live until the process exits and
@@ -422,7 +437,7 @@ void SocketMap::WatchConnections() {
 
         // Check connections without Channel. This works when `defer_seconds'
         // <= 0, in which case orphan connections will be closed immediately
-        // NOTE: save the gflag which may be reloaded at any time
+        // NOTE: save the gflag which may be reloaded at any time.
         const int defer_seconds = _options.defer_close_second_dynamic ?
             *_options.defer_close_second_dynamic :
             _options.defer_close_second;

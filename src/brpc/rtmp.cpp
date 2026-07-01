@@ -28,6 +28,7 @@
 #include "brpc/policy/rtmp_protocol.h"       // policy::*
 #include "brpc/rtmp.h"
 #include "brpc/details/rtmp_utils.h"
+#include "butil/debug/thread_annotations.h"  // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 
 namespace brpc {
@@ -1250,6 +1251,23 @@ RtmpStreamBase::RtmpStreamBase(bool is_client)
     , _chunk_stream_id(0)
     , _create_realtime_us(butil::gettimeofday_us())
     , _is_server_accepted(false) {
+    // _rtmpsock is assigned once when the stream's socket is established
+    // (RtmpClientStream::DestroyStreamUserData at end of the createStream RPC,
+    // or RtmpChunkStream::OnCreateStream on the server side) and only read
+    // afterwards, e.g. via remote_side()/local_side() from I/O bthreads. That
+    // one-time publication may race with those reads under TSan; the access is
+    // effectively safe, so annotate this pointer as a benign race.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_rtmpsock, sizeof(_rtmpsock),
+        "rtmp stream socket pointer is published once and then read-only");
+    // _paused is a best-effort pause flag: it is toggled by the protocol thread
+    // (pause/closeStream/play in rtmp_protocol.cpp) and read concurrently by the
+    // sending thread(s) in SendXXXMessage(). It carries no cross-data ordering
+    // dependency, so a slightly stale read merely sends/drops one extra frame
+    // around the pause transition, which is harmless. Annotate as a benign race.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_paused, sizeof(_paused),
+        "rtmp stream _paused is a best-effort flag accessed concurrently");
 }
 
 RtmpStreamBase::~RtmpStreamBase() {
@@ -2256,18 +2274,25 @@ void RtmpRetryingClientStream::Destroy() {
     _self_ref.swap(self_ref);
 
     butil::intrusive_ptr<RtmpStreamBase> old_sub_stream;
+    bool has_timer_ever = false;
+    bthread_timer_t create_timer_id = 0;
     {
         BAIDU_SCOPED_LOCK(_stream_mutex);
         // swap instead of reset(NULL) to make the stream destructed
         // outside _stream_mutex.
         _using_sub_stream.swap(old_sub_stream);
+        // Read _has_timer_ever/_create_timer_id under the same lock that
+        // protects their writes in OnSubStreamStop(), otherwise the read here
+        // races with the timer scheduling in another thread.
+        has_timer_ever = _has_timer_ever;
+        create_timer_id = _create_timer_id;
     }
     if (old_sub_stream) {
         old_sub_stream->Destroy();
     }
     
-    if (_has_timer_ever) {
-        if (bthread_timer_del(_create_timer_id) == 0) {
+    if (has_timer_ever) {
+        if (bthread_timer_del(create_timer_id) == 0) {
             // The callback is not run yet. Remove the additional ref added
             // before creating the timer.
             butil::intrusive_ptr<RtmpRetryingClientStream> deref(this, false);
@@ -2437,12 +2462,20 @@ void RtmpRetryingClientStream::OnSubStreamStop(RtmpStreamBase* sub_stream) {
         // retry is too frequent, schedule the retry.
         // Add a ref for OnRecreateTimer which does deref.
         butil::intrusive_ptr<RtmpRetryingClientStream>(this).detach();
-        if (bthread_timer_add(&_create_timer_id,
+        // Pass a thread-local timer_id to bthread_timer_add instead of
+        // &_create_timer_id directly. Writing the shared member _create_timer_id
+        // here races with Destroy() and with the next OnSubStreamStop() that is
+        // triggered (via the timer callback -> Recreate) on another bthread.
+        // Assign the member under _stream_mutex to serialize the accesses.
+        bthread_timer_t timer_id;
+        if (bthread_timer_add(&timer_id,
                               butil::microseconds_from_now(wait_us),
                               OnRecreateTimer, this) != 0) {
             LOG(ERROR) << "Fail to create timer";
             return CallOnStopIfNeeded();
         }
+        BAIDU_SCOPED_LOCK(_stream_mutex);
+        _create_timer_id = timer_id;
         _has_timer_ever = true;
     } else {
         Recreate();

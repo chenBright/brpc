@@ -22,6 +22,7 @@
 #include "butil/time.h"
 #include "butil/object_pool.h"
 #include "butil/unique_ptr.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "bthread/unstable.h"
 #include "brpc/log.h"
 #include "brpc/socket.h"
@@ -61,6 +62,18 @@ Stream::Stream()
     _connect_meta.on_connect = NULL;
     CHECK_EQ(0, bthread_mutex_init(&_connect_mutex, NULL));
     CHECK_EQ(0, bthread_mutex_init(&_congestion_control_mutex, NULL));
+    // _host_socket is set once via SetHostSocket() (guarded by std::call_once)
+    // but read concurrently from other bthreads (Consume, congestion control,
+    // etc.). _idle_timer is written by StartIdleTimer() and read/deleted by
+    // StopIdleTimer(), which may run on different bthreads (e.g. SetConnected
+    // vs Consume). Both are benign races in practice; suppress them for
+    // ThreadSanitizer instead of paying for atomics on these hot members.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_host_socket, sizeof(_host_socket),
+        "Stream::_host_socket is set once and read concurrently");
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_idle_timer, sizeof(_idle_timer),
+        "Stream::_idle_timer accessed by Start/StopIdleTimer concurrently");
 }
 
 Stream::~Stream() {

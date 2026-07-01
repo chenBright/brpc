@@ -19,8 +19,11 @@
 
 #include "butil/popen.h"
 #include "butil/errno.h"
+#include "butil/atomicops.h"
 #include "butil/strings/string_piece.h"
 #include "butil/build_config.h"
+#include "butil/compiler_specific.h"
+#include <memory>
 #include <gtest/gtest.h>
 
 namespace butil {
@@ -67,6 +70,15 @@ TEST(PopenTest, posix_popen) {
 
 #if defined(OS_LINUX)
 
+#if !defined(BUTIL_USE_TSAN)
+    // read_command_output_through_clone() spawns the child with
+    // clone(CLONE_VM), so the child shares the address space with the parent.
+    // ThreadSanitizer's fork/clone interception (ForkChildAfter) is
+    // incompatible with CLONE_VM children: it hits an internal
+    // "CHECK failed: ((!thr->slot)) != (0)" and aborts the child with TSan's
+    // default exit code (66), which then surfaces here as a bogus rc==66 /
+    // ECHILD failure. This is a TSan runtime limitation rather than a defect in
+    // the code under test, so skip the test when running under TSan.
 TEST(PopenTest, clone) {
     std::ostringstream oss;
     int rc = butil::read_command_output_through_clone(oss, "echo \"Hello World\"");
@@ -95,16 +107,17 @@ TEST(PopenTest, clone) {
     expected.resize(100000, '=');
     ASSERT_EQ(expected, oss.str());
 }
+#endif  // BUTIL_USE_TSAN
 
 struct CounterArg {
-    volatile int64_t counter;
-    volatile bool stop;
+    butil::atomic<int64_t> counter;
+    butil::atomic<bool> stop;
 };
 
 static void* counter_thread(void* args) {
     CounterArg* ca = (CounterArg*)args;
-    while (!ca->stop) {
-        ++ca->counter;
+    while (!ca->stop.load(std::memory_order_relaxed)) {
+        ca->counter.fetch_add(1, std::memory_order_relaxed);
     }
     return NULL;
 }
@@ -118,18 +131,27 @@ const int CHILD_STACK_SIZE = 64 * 1024;
 
 TEST(PopenTest, does_vfork_suspend_all_threads) {
     pthread_t tid;
-    CounterArg ca = { 0 , false };
-    ASSERT_EQ(0, pthread_create(&tid, NULL, counter_thread, &ca));
+    // Allocate the shared CounterArg on the heap rather than on the main
+    // thread's stack. If it lived on the stack, ThreadSanitizer could report a
+    // false data race: a previous test's stack object (e.g. the
+    // std::ostringstream in PopenTest.posix_popen) that occupied the same
+    // reused stack address leaves behind a non-atomic write in TSan's shadow
+    // memory, which then conflicts with the atomic reads performed by
+    // counter_thread on the reused address.
+    std::unique_ptr<CounterArg> ca(new CounterArg);
+    ca->counter.store(0, std::memory_order_relaxed);
+    ca->stop.store(false, std::memory_order_relaxed);
+    ASSERT_EQ(0, pthread_create(&tid, NULL, counter_thread, ca.get()));
     usleep(100 * 1000);
     char* child_stack_mem = (char*)malloc(CHILD_STACK_SIZE);
-    void* child_stack = child_stack_mem + CHILD_STACK_SIZE;  
-    const int64_t counter_before_fork = ca.counter;
+    void* child_stack = child_stack_mem + CHILD_STACK_SIZE;
+    const int64_t counter_before_fork = ca->counter.load(std::memory_order_relaxed);
     pid_t cpid = clone(fork_thread, child_stack, CLONE_VFORK, NULL);
-    const int64_t counter_after_fork = ca.counter;
+    const int64_t counter_after_fork = ca->counter.load(std::memory_order_relaxed);
     usleep(100 * 1000);
-    const int64_t counter_after_sleep = ca.counter;
+    const int64_t counter_after_sleep = ca->counter.load(std::memory_order_relaxed);
     int ws;
-    ca.stop = true;
+    ca->stop.store(true, std::memory_order_relaxed);
     pthread_join(tid, NULL);
     std::cout << "bc=" << counter_before_fork << " ac=" << counter_after_fork
               << " as=" << counter_after_sleep

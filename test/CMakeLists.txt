@@ -216,8 +216,10 @@ if(BRPC_WITH_GLOG)
     target_link_libraries(brpc-shared-debug ${GLOG_LIB})
 endif()
 
-# AddressSanitizer is incompatible with tcmalloc/gperftools, do not link it when WITH_ASAN is on
-if(WITH_ASAN)
+# AddressSanitizer and ThreadSanitizer are incompatible with tcmalloc/gperftools
+# (both intercept malloc/free and the sanitizers ship their own allocator),
+# do not link it when WITH_ASAN or WITH_TSAN is on
+if(WITH_ASAN OR WITH_TSAN)
     set(GPERFTOOLS_LIBRARIES "")
 endif()
 

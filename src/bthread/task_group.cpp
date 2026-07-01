@@ -37,6 +37,7 @@
 #include "bthread/task_group.h"
 #include "bthread/timer_thread.h"
 #include "bthread/bthread.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_*
 
 #ifdef __x86_64__
 #include <x86intrin.h>
@@ -230,6 +231,28 @@ void TaskGroup::run_main_task() {
 TaskGroup::TaskGroup(TaskControl* c)
     :  _control(c) {
     CHECK(c);
+    // _cpu_time_stat is a 128-bit stat updated via AtomicInteger128 (SSE
+    // load/store that TSan does not recognize as atomic), and _nswitch is a
+    // plain counter. Both are written by this group's worker in sched_to() and
+    // read locklessly by the bvar sampler thread (get_cumulated_worker_time /
+    // get_cumulated_switch_count). These are benign, so exempt them from TSan.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_cpu_time_stat, sizeof(_cpu_time_stat),
+        "benign bvar sampling of per-group cpu stat");
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_nswitch, sizeof(_nswitch),
+        "benign bvar sampling of per-group switch count");
+    // _nsignaled and _remote_nsignaled are plain counters written by task
+    // producers (ready_to_run / ready_to_run_remote, the latter under
+    // _remote_rq._mutex) and read locklessly by the bvar sampler thread in
+    // TaskControl::get_cumulated_signal_count(). Sampling a slightly stale
+    // count is harmless, so exempt them from TSan as well.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_nsignaled, sizeof(_nsignaled),
+        "benign bvar sampling of per-group signal count");
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_remote_nsignaled, sizeof(_remote_nsignaled),
+        "benign bvar sampling of per-group remote signal count");
 }
 
 TaskGroup::~TaskGroup() {
@@ -326,6 +349,12 @@ int TaskGroup::init(size_t runqueue_capacity) {
     stk->storage.stacksize = stack_size;
     // No guard size required for ASan.
 #endif // BUTIL_USE_ASAN
+
+#ifdef BUTIL_USE_TSAN
+    // The worker main stack reuses the worker pthread's native fiber, which is
+    // managed by TSan itself and must not be destroyed by us.
+    stk->tsan_fiber = BUTIL_TSAN_GET_CURRENT_FIBER();
+#endif // BUTIL_USE_TSAN
 
     _cur_meta = m;
     _main_tid = m->tid;
@@ -453,6 +482,21 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
 #ifdef BRPC_BTHREAD_TRACER
         bool tracing = false;
 #endif // BRPC_BTHREAD_TRACER
+        // The joiner reads *version_butex atomically (in butex_wait) while this
+        // thread bumps it under version_lock with a non-atomic ++ (followed by
+        // butex_wake). brpc relies on this being benign, so exempt it from TSan.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            m->version_butex, sizeof(*m->version_butex),
+            "benign version_butex bump vs joiner load");
+        // Publish this bthread's memory effects *before* bumping the version.
+        // A joiner may observe the new version through the lock-free fast path
+        // in join() (the `while (*version_butex == expected_version)` check)
+        // and return without ever blocking in butex_wait()/futex. In that case
+        // neither the non-atomic version bump nor a futex edge tells TSan about
+        // the happens-before, so we establish it explicitly here, paired with
+        // BUTIL_TSAN_ACQUIRE() in join(). It must precede the bump so the edge
+        // is in place by the time the new version becomes observable.
+        BUTIL_TSAN_RELEASE(m->version_butex);
         {
             BAIDU_SCOPED_LOCK(m->version_lock);
 #ifdef BRPC_BTHREAD_TRACER
@@ -601,7 +645,21 @@ int TaskGroup::start_background(bthread_t* __restrict th,
     m->cpuwide_start_ns = start_ns;
     m->stat = EMPTY_STAT;
     m->tid = make_tid(*m->version_butex, slot);
-    m->priority_index = _cur_meta->priority_index;
+    if (REMOTE) {
+        // start_background<true> is only called from non-worker threads (see
+        // start_from_non_worker). There is no parent bthread to inherit the
+        // priority from, and `_cur_meta` here belongs to a TaskGroup owned by
+        // another worker which concurrently overwrites it in sched_to() -- a
+        // real data race flagged by TSan. Reading that foreign group's current
+        // task priority is meaningless anyway (the group is picked by
+        // choose_one_group()), so use the default priority index (-1, i.e. no
+        // global priority, same as TaskMeta's default) instead.
+        m->priority_index = -1;
+    } else {
+        // Called from a worker, `this` is the current worker's own group, so
+        // reading _cur_meta is safe and inherits the parent task's priority.
+        m->priority_index = _cur_meta->priority_index;
+    }
     *th = m->tid;
     if (using_attr.flags & BTHREAD_LOG_START_AND_FINISH) {
         LOG(INFO) << "Started bthread " << m->tid;
@@ -653,10 +711,22 @@ int TaskGroup::join(bthread_t tid, void** return_value) {
             return errno;
         }
     }
+    // Acquire the memory effects published by the joined bthread's version
+    // bump (paired with BUTIL_TSAN_RELEASE() in task_runner()). This is needed
+    // even when the loop above observed the new version through the lock-free
+    // fast path without ever blocking in butex_wait(): in that case no
+    // futex/atomic edge would otherwise inform TSan of the happens-before, and
+    // it would falsely report races on memory the joined bthread last touched.
+    BUTIL_TSAN_ACQUIRE(m->version_butex);
     // Ensure all memory writes made by the joined bthread are visible to
     // the joining thread after join returns. This matches the semantic
     // guarantee provided by pthread_join() across supported architectures.
+    // Under ThreadSanitizer the standalone atomic_thread_fence(acquire) is
+    // unsupported (triggers -Wtsan under GCC); the BUTIL_TSAN_ACQUIRE above
+    // already establishes the happens-before edge for the sanitizer build.
+#if !defined(BUTIL_USE_TSAN)
     butil::atomic_thread_fence(butil::memory_order_acquire);
+#endif
     if (return_value) {
         *return_value = NULL;
     }
@@ -801,10 +871,7 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
                 g->_control->_task_tracer.set_status(TASK_STATUS_JUMPING, cur_meta);
                 g->_control->_task_tracer.set_status(TASK_STATUS_JUMPING, next_meta);
 #endif // BRPC_BTHREAD_TRACER
-                {
-                    BTHREAD_SCOPED_ASAN_FIBER_SWITCHER(next_meta->stack->storage);
-                    jump_stack(cur_meta->stack, next_meta->stack);
-                }
+                jump_stack(cur_meta->stack, next_meta->stack);
                 // probably went to another group, need to assign g again.
                 g = BAIDU_GET_VOLATILE_THREAD_LOCAL(tls_task_group);
 #ifdef BRPC_BTHREAD_TRACER
@@ -1031,6 +1098,13 @@ int TaskGroup::usleep(TaskGroup** pg, uint64_t timeout_us) {
     // We have to schedule timer after we switched to next bthread otherwise
     // the timer may wake up(jump to) current still-running context.
     SleepArgs e = { timeout_us, g->current_tid(), g->current_task(), g };
+    // _add_sleep_event() (run in the timer-thread-driven remained callback)
+    // writes e.meta->current_sleep under version_lock, while this thread clears
+    // it lock-free below after waking. The race is intentional and benign
+    // (interrupt() tolerates seeing either the old id or 0), so mark it.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &e.meta->current_sleep, sizeof(e.meta->current_sleep),
+        "benign race on TaskMeta::current_sleep (sleeper vs timer)");
     g->set_remained(_add_sleep_event, &e);
     sched(pg);
     g = *pg;
@@ -1164,6 +1238,16 @@ void print_task(std::ostream& os, bthread_t tid, bool enable_trace,
     {
         BAIDU_SCOPED_LOCK(m->version_lock);
         if (given_ver == *m->version_butex) {
+            // This function only dumps a best-effort diagnostic snapshot for
+            // /bthreads. A running bthread may concurrently update these fields
+            // during context switch without taking version_lock; stale values
+            // here are acceptable and do not affect scheduler correctness.
+            BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+                &m->stat, sizeof(m->stat),
+                "print_task reads TaskMeta::stat for diagnostics");
+            BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+                &m->local_storage, sizeof(m->local_storage),
+                "print_task reads TaskMeta::local_storage for diagnostics");
             matched = true;
             stop = m->stop;
             interrupted = m->interrupted;

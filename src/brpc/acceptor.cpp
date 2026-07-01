@@ -18,9 +18,10 @@
 
 #include <inttypes.h>
 #include <gflags/gflags.h>
-#include "butil/fd_guard.h"                 // fd_guard 
+#include "butil/fd_guard.h"                 // fd_guard
 #include "butil/fd_utility.h"               // make_close_on_exec
 #include "butil/time.h"                     // gettimeofday_us
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "brpc/acceptor.h"
 #include "brpc/transport_factory.h"
 
@@ -202,6 +203,10 @@ void Acceptor::Join() {
 size_t Acceptor::ConnectionCount() const {
     // Notice that _socket_map may be modified concurrently. This actually
     // assumes that size() is safe to call concurrently.
+    // The data race here is benign: we're only reading the size for monitoring
+    // purposes, and occasional stale values are acceptable.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(&_socket_map, sizeof(_socket_map),
+                                           "ConnectionCount reads _socket_map.size() without lock");
     return _socket_map.size();
 }
 

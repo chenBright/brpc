@@ -47,10 +47,19 @@ public:
     // Remove one ref, if the ref_count hit zero, delete this object.
     // Same as butil::intrusive_ptr<T>(obj, false).reset(NULL)
     void RemoveRefManually() {
+        // Under ThreadSanitizer the standalone atomic_thread_fence(acquire) is
+        // unsupported (triggers -Wtsan under GCC and cannot be modeled), so the
+        // acquire fence is folded into the RMW via acq_rel.
+#if defined(BUTIL_USE_TSAN)
+        if (_nref.fetch_sub(1, butil::memory_order_acq_rel) == 1) {
+            delete this;
+        }
+#else
         if (_nref.fetch_sub(1, butil::memory_order_release) == 1) {
             butil::atomic_thread_fence(butil::memory_order_acquire);
             delete this;
         }
+#endif
     }
 
 protected:

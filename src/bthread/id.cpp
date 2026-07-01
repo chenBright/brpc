@@ -21,6 +21,7 @@
 
 #include <deque>
 #include "butil/logging.h"
+#include "butil/debug/thread_annotations.h"      // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "bthread/butex.h"                       // butex_*
 #include "bthread/mutex.h"
 #include "bthread/list_of_abafree_id.h"
@@ -130,6 +131,38 @@ struct BAIDU_CACHELINE_ALIGNMENT Id {
         join_butex = bthread::butex_create_checked<uint32_t>();
         *butex = 0;
         *join_butex = 0;
+        // The butex memory is a butil::atomic<int> taken from ObjectPool<Butex>
+        // (see butex.cpp). It is read atomically by butex_wait() WITHOUT
+        // holding Id::mutex, while here (and in the other bthread_id_* helpers)
+        // it is updated through a plain uint32_t* under Id::mutex. This mismatch
+        // is intentional: cross-thread data visibility is guaranteed by
+        // Id::mutex together with the butex wake protocol, and butexes are never
+        // freed (a stale read at most causes a harmless spurious wakeup). Both
+        // the Id (managed by a ResourcePool) and the butexes are never freed,
+        // so annotating the two butexes once at construction covers their whole
+        // lifetime. Mark them benign so TSan stops reporting this by-design
+        // race instead of forcing atomic accesses everywhere.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            butex, sizeof(uint32_t),
+            "benign bthread::Id::butex (Id::mutex vs butex_wait fast path)");
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            join_butex, sizeof(uint32_t),
+            "benign bthread::Id::join_butex (Id::mutex vs butex_wait fast path)");
+        // `first_ver`/`locked_ver` are read on a lock-free fast path by
+        // id_exists_with_true_negatives() (used by ListOfABAFreeId::apply)
+        // WITHOUT holding Id::mutex, while id_create_impl() and
+        // bthread_id_unlock_and_destroy() update them. As the function name
+        // implies, the check only needs to be correct for true negatives and
+        // tolerates stale reads (real users re-validate under Id::mutex via
+        // has_version()). The Id lives in a ResourcePool and is never freed,
+        // so annotating once at construction covers its whole lifetime. Mark
+        // them benign so TSan stops reporting this by-design race.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &first_ver, sizeof(first_ver),
+            "benign bthread::Id::first_ver (lock-free id_exists fast path)");
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            &locked_ver, sizeof(locked_ver),
+            "benign bthread::Id::locked_ver (lock-free id_exists fast path)");
     }
 
     ~Id() {

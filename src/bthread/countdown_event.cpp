@@ -22,6 +22,7 @@
 #include "butil/atomicops.h"     // butil::atomic<int>
 #include "bthread/butex.h"
 #include "bthread/countdown_event.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 
 namespace bthread {
 
@@ -53,6 +54,13 @@ void CountdownEvent::signal(int sig, bool flush) {
 }
 
 int CountdownEvent::wait() {
+    // Multiple waiters may call wait()/timed_wait() concurrently on the same
+    // CountdownEvent, each writing this flag without synchronization. The
+    // writes are always identical (true) and the flag only feeds a LOG_IF
+    // sanity check in add_count()/reset(), so the race is benign; exempt it.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_wait_was_invoked, sizeof(_wait_was_invoked),
+        "benign concurrent CountdownEvent::_wait_was_invoked write");
     _wait_was_invoked = true;
     for (;;) {
         const int seen_counter = 
@@ -91,6 +99,10 @@ void CountdownEvent::reset(int v) {
 }
 
 int CountdownEvent::timed_wait(const timespec& duetime) {
+    // See wait(): concurrent waiters writing this debug-only flag is benign.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &_wait_was_invoked, sizeof(_wait_was_invoked),
+        "benign concurrent CountdownEvent::_wait_was_invoked write");
     _wait_was_invoked = true;
     for (;;) {
         const int seen_counter = 

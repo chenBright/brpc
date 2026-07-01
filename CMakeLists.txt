@@ -30,6 +30,7 @@ option(WITH_RDMA "With RDMA" OFF)
 option(WITH_DEBUG_BTHREAD_SCHE_SAFETY "With debugging bthread sche safety" OFF)
 option(WITH_DEBUG_LOCK "With debugging lock" OFF)
 option(WITH_ASAN "With AddressSanitizer" OFF)
+option(WITH_TSAN "With ThreadSanitizer" OFF)
 option(BUILD_UNIT_TESTS "Whether to build unit tests" OFF)
 option(BUILD_FUZZ_TESTS "Whether to build fuzz tests" OFF)
 option(BUILD_BRPC_TOOLS "Whether to build brpc tools" ON)
@@ -137,9 +138,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 
 set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} ${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_GLOG=${WITH_GLOG_VAL} -DBRPC_WITH_RDMA=${WITH_RDMA_VAL} -DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=${WITH_DEBUG_BTHREAD_SCHE_SAFETY_VAL} -DBRPC_DEBUG_LOCK=${WITH_DEBUG_LOCK_VAL}")
+if (WITH_ASAN AND WITH_TSAN)
+    message(FATAL_ERROR "WITH_ASAN and WITH_TSAN are mutually exclusive")
+endif()
 if (WITH_ASAN)
     set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} -fsanitize=address")
     set(CMAKE_C_FLAGS "${CMAKE_CPP_FLAGS} -fsanitize=address")
+endif()
+if (WITH_TSAN)
+    # THREAD_SANITIZER switches butil/atomicops.h to the TSan-aware atomic
+    # implementation and lets other modules skip TSan-incompatible code paths.
+    # Benign-race annotations (butil/debug/thread_annotations.h) call the TSan
+    # runtime's AnnotateBenignRaceSized directly, so no extra defines are needed.
+    set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} -fsanitize=thread")
+    set(CMAKE_C_FLAGS "${CMAKE_CPP_FLAGS} -fsanitize=thread")
 endif()
 if(WITH_MESALINK)
     set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} -DUSE_MESALINK")

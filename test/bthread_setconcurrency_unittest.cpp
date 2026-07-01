@@ -151,6 +151,16 @@ int get_min_concurrency() {
 }
 
 TEST(BthreadTest, min_concurrency) {
+#ifdef BUTIL_USE_TSAN
+    // Under ThreadSanitizer, creating worker pthreads is far slower (each
+    // worker = pthread_create + TSan fiber init), so the lazily-grown worker
+    // count cannot reach the configured max before the first sleep_proc
+    // bthreads (100ms each) wake up and release workers. As a result
+    // g_task_control->concurrency() falls short of conn+add_conn, making this
+    // timing-sensitive assertion flaky. Skip it under TSan.
+    GTEST_SKIP() << "worker growth is too slow under TSan to reach max "
+                    "concurrency within the test's timing window";
+#endif
     ASSERT_EQ(1, set_min_concurrency(-1)); // set min success
     ASSERT_EQ(1, set_min_concurrency(0)); // set min success
     ASSERT_EQ(0, get_min_concurrency());

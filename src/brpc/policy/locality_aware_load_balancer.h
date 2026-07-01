@@ -22,6 +22,7 @@
 #include <vector>                                      // std::vector
 #include <deque>                                       // std::deque
 #include <map>                                         // std::map
+#include "butil/compiler_specific.h"                    // BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
 #include "butil/containers/flat_map.h"                  // FlatMap
 #include "butil/containers/doubly_buffered_data.h"      // DoublyBufferedData
 #include "butil/containers/bounded_queue.h"             // BoundedQueue
@@ -72,7 +73,17 @@ private:
         int64_t Update(const CallInfo&, size_t index);
 
         // Weight of self. Notice that this value may change at any time.
-        int64_t volatile_value() const { return _weight; }
+        // _weight is read here without holding _mutex (called from
+        // SelectServer) while it may be modified under _mutex elsewhere. This
+        // race is intentional and benign: the selection algorithm tolerates
+        // inconsistent weights (see comments in SelectServer). Instead of
+        // paying for an atomic, the read-only accessor is exempted from TSan.
+        // The body is defined in the .cpp (not here) and marked NOINLINE so
+        // that it is never inlined into the caller (e.g. SelectServer): if it
+        // were inlined, the no_sanitize_thread attribute would be lost and
+        // TSan would still instrument the read and report a (benign) race.
+        BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD NOINLINE
+        int64_t volatile_value() const;
 
         struct AddInflightResult {
             bool chosen;

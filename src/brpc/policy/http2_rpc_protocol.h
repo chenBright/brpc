@@ -25,6 +25,7 @@
 #include "brpc/details/hpack.h"
 #include "brpc/stream_creator.h"
 #include "brpc/controller.h"
+#include "butil/scoped_lock.h"
 
 #ifndef NDEBUG
 #include "bvar/bvar.h"
@@ -142,10 +143,19 @@ public:
     { return _nref.fetch_add(1, butil::memory_order_relaxed); }
 
     void RemoveRefManually() {
+        // Under ThreadSanitizer the standalone atomic_thread_fence(acquire) is
+        // unsupported (triggers -Wtsan under GCC); fold the acquire fence into
+        // the RMW via acq_rel.
+#if defined(BUTIL_USE_TSAN)
+        if (_nref.fetch_sub(1, butil::memory_order_acq_rel) == 1) {
+            Destroy();
+        }
+#else
         if (_nref.fetch_sub(1, butil::memory_order_release) == 1) {
             butil::atomic_thread_fence(butil::memory_order_acquire);
             Destroy();
         }
+#endif
     }
 
     // @SocketMessage
@@ -337,7 +347,10 @@ public:
     // Try to map stream_id to ctx if stream_id does not exist before
     // Returns 0 on success, -1 on exist, 1 on goaway.
     int TryToInsertStream(int stream_id, H2StreamContext* ctx);
-    size_t VolatilePendingStreamSize() const { return _pending_streams.size(); }
+    size_t VolatilePendingStreamSize() const {
+        BAIDU_SCOPED_LOCK(_stream_mutex);
+        return _pending_streams.size();
+    }
 
     HPacker& hpacker() { return _hpacker; }
     const H2Settings& remote_settings() const { return _remote_settings; }
@@ -381,7 +394,7 @@ friend void InitFrameHandlers();
     butil::atomic<int64_t> _remote_window_left;
     H2ConnectionState _conn_state;
     int _last_received_stream_id;
-    uint32_t _last_sent_stream_id;
+    butil::atomic<uint32_t> _last_sent_stream_id;
     int _goaway_stream_id;
     H2Settings _remote_settings;
     bool _remote_settings_received;
@@ -397,18 +410,25 @@ friend void InitFrameHandlers();
 };
 
 inline int H2Context::AllocateClientStreamId() {
-    if (RunOutStreams()) {
-        LOG(WARNING) << "Fail to allocate new client stream, _last_sent_stream_id="
-            << _last_sent_stream_id;
-        return -1;
-    }
-    const int id = _last_sent_stream_id;
-    _last_sent_stream_id += 2;
-    return id;
+    // Atomically allocate a new stream id. Multiple RPCs may share the same
+    // H2Context and call this concurrently (each H2UnsentRequest only holds
+    // its own mutex, which does NOT serialize accesses to the shared
+    // H2Context), so a plain read-modify-write would be a data race and could
+    // even hand out duplicated stream ids.
+    uint32_t id = _last_sent_stream_id.load(butil::memory_order_relaxed);
+    do {
+        if (id > 0x7FFFFFFF) {
+            LOG(WARNING) << "Fail to allocate new client stream, _last_sent_stream_id="
+                << id;
+            return -1;
+        }
+    } while (!_last_sent_stream_id.compare_exchange_weak(
+                 id, id + 2, butil::memory_order_relaxed));
+    return static_cast<int>(id);
 }
 
 inline bool H2Context::RunOutStreams() const {
-    return (_last_sent_stream_id > 0x7FFFFFFF);
+    return (_last_sent_stream_id.load(butil::memory_order_relaxed) > 0x7FFFFFFF);
 }
 
 inline std::ostream& operator<<(std::ostream& os, const H2UnsentRequest& req) {

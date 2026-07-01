@@ -105,6 +105,11 @@ private:
     DISALLOW_COPY_AND_ASSIGN(HttpMessage);
     int UnlockAndFlushToBodyReader(std::unique_lock<butil::Mutex>& locked);
 
+    // `_stage' is written without holding `_body_mutex' in the parsing
+    // callbacks (e.g. OnBody) but read while holding `_body_mutex' in
+    // SetBodyReader() called from another thread. The mismatch is benign
+    // (see the comment in HttpMessage's constructor) and is suppressed for
+    // TSan via BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED there.
     HttpParserStage _stage{HTTP_ON_MESSAGE_BEGIN};
     std::string _url;
     HttpMethod _request_method{HTTP_METHOD_GET};

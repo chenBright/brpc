@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include "butil/time.h"
 #include "butil/macros.h"
+#include "butil/atomicops.h"
 #include "bthread/bthread.h"
 #include "bthread/task_group.h"
 #include "bthread/butex.h"
@@ -417,7 +418,9 @@ TEST(BthreadIdTest, reset_range) {
     bthread_id_unlock_and_destroy(id);
 }
 
-static bool any_thread_quit = false;
+// Written concurrently by multiple threads in fail_to_lock_id() and read by
+// the test thread, so it must be atomic to avoid a data race (ThreadSanitizer).
+static butil::atomic<bool> any_thread_quit(false);
 
 struct FailToLockIdArgs {
     bthread_id_t id;
@@ -486,7 +489,7 @@ TEST(BthreadIdTest, about_to_destroy_during_locking) {
     ASSERT_EQ(0, bthread_start_background(&bth, NULL, fail_to_lock_id, &args));
 
     usleep(100000);
-    ASSERT_FALSE(any_thread_quit);
+    ASSERT_FALSE(any_thread_quit.load());
     ASSERT_EQ(0, bthread_id_about_to_destroy(id));
 
     // The threads should quit soon.

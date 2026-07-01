@@ -19,6 +19,7 @@
 #include "butil/compat.h"
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <vector>
 #include <gtest/gtest.h>
 #include "butil/time.h"
 #include "butil/macros.h"
@@ -42,8 +43,8 @@ int stop_and_join_epoll_threads();
 }
 
 namespace {
-volatile bool client_stop = false;
-volatile bool server_stop = false;
+butil::atomic<bool> client_stop(false);
+butil::atomic<bool> server_stop(false);
 
 struct BAIDU_CACHELINE_ALIGNMENT ClientMeta {
     int fd;
@@ -57,8 +58,10 @@ struct BAIDU_CACHELINE_ALIGNMENT SocketMeta {
     butil::atomic<int> req;
     char* buf;
     size_t buf_cap;
-    size_t bytes;
-    size_t times;
+    // Updated by process_thread bthreads. They remain atomics because the same
+    // SocketMeta may be handled by different process_thread bthreads over time.
+    butil::atomic<size_t> bytes;
+    butil::atomic<size_t> times;
 };
 
 struct EpollMeta {
@@ -74,8 +77,8 @@ void* process_thread(void* arg) {
         do {
             ssize_t n = read(m->fd, m->buf, m->buf_cap);
             if (n > 0) {
-                m->bytes += n;
-                ++m->times;
+                m->bytes.fetch_add(n, butil::memory_order_relaxed);
+                m->times.fetch_add(1, butil::memory_order_relaxed);
                 if ((size_t)n < m->buf_cap) {
                     break;
                 }
@@ -106,17 +109,20 @@ void* process_thread(void* arg) {
     return NULL;
 }
 
-void* epoll_thread(void* arg) {    
+void* epoll_thread(void* arg) {
     EpollMeta* em = (EpollMeta*)arg;
     em->nthread = 0;
     em->nfold = 0;
+    // Collect the process_thread bthreads started below so they can be joined
+    // before this epoll_thread returns.
+    std::vector<bthread_t> processors;
 #if defined(OS_LINUX)
     epoll_event e[32];
 #elif defined(OS_MACOSX)
     struct kevent e[32];
 #endif
 
-    while (!server_stop) {
+    while (!server_stop.load(butil::memory_order_relaxed)) {
 #if defined(OS_LINUX)
         // Use a finite timeout so the loop can observe server_stop without
         // relying on an external fd to wake up epoll_wait.
@@ -131,7 +137,7 @@ void* epoll_thread(void* arg) {
             continue;
         }
 #endif
-        if (server_stop) {
+        if (server_stop.load(butil::memory_order_relaxed)) {
             break;
         }
         if (n < 0) {
@@ -154,13 +160,25 @@ void* epoll_thread(void* arg) {
 #endif
             if (m->req.fetch_add(1, butil::memory_order_acquire) == 0) {
                 bthread_t th;
-                bthread_start_urgent(
-                    &th, &BTHREAD_ATTR_SMALL, process_thread, m);
+                if (bthread_start_urgent(
+                        &th, &BTHREAD_ATTR_SMALL, process_thread, m) == 0) {
+                    // Record the joinable bthread so it can be joined before
+                    // this epoll_thread returns.
+                    processors.push_back(th);
+                }
                 ++em->nthread;
             } else {
                 ++em->nfold;
             }
         }
+    }
+    // Join all process_thread bthreads started by this epoll_thread. Once the
+    // test body joins this epoll_thread, all process_thread accesses to
+    // SocketMeta (read()/buf/bytes/times/req) are guaranteed to have finished,
+    // so the stats reads and resource cleanup in the test body are free of data
+    // races under TSan.
+    for (size_t i = 0; i < processors.size(); ++i) {
+        bthread_join(processors[i], NULL);
     }
     return NULL;
 }
@@ -175,7 +193,7 @@ void* client_thread(void* arg) {
     for (size_t i = 0; i < buf_cap/8; ++i) {
         ((uint64_t*)buf)[i] = i;
     }
-    while (!client_stop) {
+    while (!client_stop.load(butil::memory_order_relaxed)) {
         ssize_t n;
         if (offset == 0) {
             n = write(m->fd, buf, buf_cap);
@@ -215,8 +233,8 @@ inline uint32_t fmix32 ( uint32_t h ) {
 }
 
 TEST(DispatcherTest, dispatch_tasks) {
-    client_stop = false;
-    server_stop = false;
+    client_stop.store(false, butil::memory_order_relaxed);
+    server_stop.store(false, butil::memory_order_relaxed);
 
     const size_t NEPOLL = 1;
     const size_t NCLIENT = 16;
@@ -286,11 +304,36 @@ TEST(DispatcherTest, dispatch_tasks) {
 
     tm.stop();
     ProfilerStop();
+    // Stop and join all worker threads BEFORE reading their stats. The join
+    // operations establish a happens-before relationship so that the reads
+    // below are properly synchronized and free of data races under TSan.
+    client_stop.store(true, butil::memory_order_relaxed);
+    for (size_t i = 0; i < NCLIENT; ++i) {
+        pthread_join(cth[i], NULL);
+    }
+    server_stop.store(true, butil::memory_order_relaxed);
+    // epoll_thread polls server_stop with a finite timeout, so it exits on its
+    // own without needing an external fd to wake up epoll_wait. Before
+    // returning, each epoll_thread joins all of the process_thread bthreads it
+    // started, so joining epoll_thread here also waits for those to finish.
+    for (size_t i = 0; i < NEPOLL; ++i) {
+#ifdef RUN_EPOLL_IN_BTHREAD
+        bthread_join(eth[i], NULL);
+#else
+        pthread_join(eth[i], NULL);
+#endif
+    }
+    bthread::stop_and_join_epoll_threads();
+
+    // epoll_thread joins all of its process_thread bthreads before returning,
+    // so once it has been joined above all worker threads have stopped and it
+    // is safe to read their stats. SocketMeta::bytes is an atomic, read with a
+    // relaxed load since the happens-before is already established by the joins.
     size_t client_bytes = 0;
     size_t server_bytes = 0;
     for (size_t i = 0; i < NCLIENT; ++i) {
         client_bytes += cm[i]->bytes;
-        server_bytes += sm[i]->bytes;
+        server_bytes += sm[i]->bytes.load(butil::memory_order_relaxed);
     }
     size_t all_nthread = 0, all_nfold = 0;
     for (size_t i = 0; i < NEPOLL; ++i) {
@@ -301,23 +344,6 @@ TEST(DispatcherTest, dispatch_tasks) {
     LOG(INFO) << "client_tp=" << client_bytes / (double)tm.u_elapsed()
               << "MB/s server_tp=" << server_bytes / (double)tm.u_elapsed()
               << "MB/s nthread=" << all_nthread << " nfold=" << all_nfold;
-
-    client_stop = true;
-    for (size_t i = 0; i < NCLIENT; ++i) {
-        pthread_join(cth[i], NULL);
-    }
-    server_stop = true;
-    // epoll_thread polls server_stop with a finite timeout, so it exits on its
-    // own without needing an external fd to wake up epoll_wait.
-    for (size_t i = 0; i < NEPOLL; ++i) {
-#ifdef RUN_EPOLL_IN_BTHREAD
-        bthread_join(eth[i], NULL);
-#else
-        pthread_join(eth[i], NULL);
-#endif
-    }
-    bthread::stop_and_join_epoll_threads();
-    bthread_usleep(100000);
 
     for (size_t i = 0; i < NCLIENT; ++i) {
         free(sm[i]->buf);

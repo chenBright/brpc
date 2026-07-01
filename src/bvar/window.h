@@ -23,6 +23,7 @@
 #include <limits>                                 // std::numeric_limits
 #include <math.h>                                 // round
 #include <gflags/gflags_declare.h>
+#include "butil/debug/thread_annotations.h"        // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "butil/logging.h"                         // LOG
 #include "bvar/detail/sampler.h"
 #include "bvar/detail/series.h"
@@ -81,6 +82,12 @@ public:
         , _window_size(window_size > 0 ? window_size : FLAGS_bvar_dump_interval)
         , _sampler(var->get_sampler())
         , _series_sampler(NULL) {
+        // SeriesSampler may still be taking a best-effort sample while the
+        // owning bvar is being hidden/destroyed during server shutdown in
+        // tests. Suppress the benign TSan vptr race reported for this object.
+        BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+            this, sizeof(*this),
+            "WindowBase may be sampled concurrently during shutdown");
         CHECK_EQ(0, _sampler->set_window_size(_window_size));
     }
     

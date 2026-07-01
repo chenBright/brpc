@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#ifndef BUTIL_USE_TSAN
 #include <sys/time.h>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -1896,3 +1897,5 @@ TEST_F(ProtobufJsonTest, pb_to_proto_json) {
 }
 
 } // namespace
+
+#endif

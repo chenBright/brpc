@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <sched.h>
 
+#include "butil/debug/thread_annotations.h"
 #include "butil/lazy_instance.h"
 #include "butil/logging.h"
 #include "butil/memory/scoped_ptr.h"
@@ -114,6 +115,19 @@ bool CreateThread(size_t stack_size, bool joinable,
   params.joinable = joinable;
   params.priority = priority;
   params.handle = thread_handle;
+
+  // |params| is a stack object shared with the freshly created thread. Its
+  // lifetime is correctly synchronized: the new thread reads it after
+  // pthread_create() establishes a happens-before edge (parent -> child), and
+  // this function does not return (destroying |params|) until the child signals
+  // |params.handle_set| (child -> parent). However, because |params| lives on
+  // the main thread stack, TSan may attribute stale shadow records left by
+  // previous, unrelated stack frames that happened to reuse the same address to
+  // the child's reads, producing a spurious "data race" whose "previous write"
+  // points at completely unrelated code. Mark the range as benign to silence
+  // this stack-reuse false positive without weakening detection elsewhere.
+  BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+      &params, sizeof(params), "ThreadParams shared via stack, see comment");
 
   pthread_t handle;
   int err = pthread_create(&handle,

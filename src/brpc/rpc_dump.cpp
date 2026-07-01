@@ -23,6 +23,7 @@
 #include "butil/unique_ptr.h"
 #include "butil/fast_rand.h"
 #include "butil/files/file_enumerator.h"
+#include "butil/debug/thread_annotations.h" // BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED
 #include "bvar/bvar.h"
 #include "brpc/log.h"
 #include "brpc/reloadable_flags.h"
@@ -69,6 +70,8 @@ class RpcDumpContext {
 public:
     void SaveFlags();
 
+    void LoadDir();
+
     void SetRound(size_t round);
     
     void Dump(size_t round, SampledRequest*);
@@ -85,6 +88,7 @@ public:
         , _last_file_time(0)
     {
         _command_name = bvar::read_command_name();
+        LoadDir();
         SaveFlags();
         // Clean the directory at fist time.
         butil::DeleteFile(_dir, true); 
@@ -136,8 +140,15 @@ void SampledRequest::destroy() {
     delete this;
 }
 
-// Save gflags which could be reloaded at anytime.
-void RpcDumpContext::SaveFlags() {
+// Read the dump directory once (at construction). rpc_dump_dir is effectively a
+// start-up only setting: the directory is cleaned once at construction and the
+// file-rotation bookkeeping (_filenames) is bound to it, so re-reading it on
+// every dump round serves no purpose. More importantly, reading this *string*
+// gflag from the bvar collector thread races with gflags' global
+// StringFlagDestructor at process exit, which frees the flag's storage WITHOUT
+// taking gflags' lock (a real use-after-free, not a benign POD read). Reading
+// it only once here, long before exit, eliminates that data race.
+void RpcDumpContext::LoadDir() {
     std::string dir;
     CHECK(GFLAGS_NAMESPACE::GetCommandLineOption("rpc_dump_dir", &dir));
     
@@ -146,8 +157,24 @@ void RpcDumpContext::SaveFlags() {
         dir.replace(pos, 5/*<app>*/, _command_name);
     }
     _dir = butil::FilePath(dir);
+}
 
+// Save reloadable POD gflags which could be changed at runtime.
+void RpcDumpContext::SaveFlags() {
+    // FLAGS_rpc_dump_max_requests_in_one_file and FLAGS_rpc_dump_max_files are
+    // reloadable POD flags. brpc reads reloadable flags lock-free everywhere
+    // while they may be changed at runtime through SetCommandLineOption(). Such
+    // word-sized, value-semantic reads are intentionally racy but benign: at
+    // worst we observe a slightly stale value for a single dump round. Annotate
+    // them so ThreadSanitizer does not flag this expected pattern.
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &FLAGS_rpc_dump_max_requests_in_one_file,
+        sizeof(FLAGS_rpc_dump_max_requests_in_one_file),
+        "reloadable flag read lock-free, benign");
     _max_requests_in_one_file = FLAGS_rpc_dump_max_requests_in_one_file;
+    BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED(
+        &FLAGS_rpc_dump_max_files, sizeof(FLAGS_rpc_dump_max_files),
+        "reloadable flag read lock-free, benign");
     _max_files = FLAGS_rpc_dump_max_files;
 }
 

@@ -108,6 +108,9 @@ friend struct butil::DefaultDeleter<Stream>;
         bthread_timer_t timer;
     };
 
+    // Set once via SetHostSocket() (guarded by std::call_once) and read from
+    // multiple bthreads concurrently. The resulting benign data races are
+    // suppressed for TSan via BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED in the ctor.
     Socket*     _host_socket;  // Every stream within a Socket holds a reference
     Socket*     _fake_socket_weak_ref;  // Not holding reference
     StreamId    _id;
@@ -134,6 +137,9 @@ friend struct butil::DefaultDeleter<Stream>;
     bthread::ExecutionQueueId<butil::IOBuf*> _consumer_queue;
     butil::IOBuf *_pending_buf;
     int64_t _start_idle_timer_us;
+    // StartIdleTimer()/StopIdleTimer() may run on different bthreads
+    // concurrently (e.g. SetConnected vs Consume). The benign data race is
+    // suppressed for TSan via BUTIL_TSAN_ANNOTATE_BENIGN_RACE_SIZED in the ctor.
     bthread_timer_t _idle_timer;
     std::once_flag _set_host_socket_flag;
 };

@@ -419,7 +419,9 @@ public:
     };
 
     // True if write of socket is shutdown.
-    bool IsWriteShutdown() const { return _is_write_shutdown; }
+    bool IsWriteShutdown() const {
+        return _is_write_shutdown.load(butil::memory_order_relaxed);
+    }
 
     int Write(butil::IOBuf *msg, const WriteOptions* options = NULL);
 
@@ -444,6 +446,12 @@ public:
     int32_t health_check_timeout_ms() const {return _hc_option.health_check_timeout_ms; }
 
     // True if health checking is enabled.
+    // BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD: the standalone atomic_thread_fence
+    // below is not supported by ThreadSanitizer (triggers -Wtsan under GCC and
+    // cannot be modeled). Excluding this tiny read-only accessor from TSan
+    // instrumentation silences the warning while keeping the real CPU acquire
+    // fence intact for normal builds.
+    BUTIL_ATTRIBUTE_NO_SANITIZE_THREAD
     bool HCEnabled() const {
         // This fence makes sure that we see change of
         // `_is_hc_related_ref_held' before changing `_versioned_ref.
@@ -559,8 +567,12 @@ public:
     // Undo previous PopPipelinedInfo
     void GivebackPipelinedInfo(const PipelinedInfo&);
 
-    void set_preferred_index(int index) { _preferred_index = index; }
-    int preferred_index() const { return _preferred_index; }
+    void set_preferred_index(int index) {
+        _preferred_index.store(index, butil::memory_order_relaxed);
+    }
+    int preferred_index() const {
+        return _preferred_index.load(butil::memory_order_relaxed);
+    }
 
     void set_type_of_service(int tos) { _tos = tos; }
 
@@ -663,7 +675,9 @@ public:
     }
 
     // Returns true if the remote side is overcrowded.
-    bool is_overcrowded() const { return _overcrowded; }
+    bool is_overcrowded() const {
+        return _overcrowded.load(butil::memory_order_relaxed);
+    }
 
     bthread_keytable_pool_t* keytable_pool() const { return _keytable_pool; }
 
@@ -870,7 +884,7 @@ private:
 
     // last chosen index of the protocol as a heuristic value to avoid
     // iterating all protocol handlers each time.
-    int _preferred_index;
+    butil::atomic<int> _preferred_index;
 
     // Number of HC since the last SetFailed() was called. Set to 0 when the
     // socket is revived. Only set in HealthCheckTask::OnTriggeringTask()
@@ -942,7 +956,7 @@ private:
     butil::atomic<bool> _controller_released_socket;
 
     // True if the socket is too full to write.
-    volatile bool _overcrowded;
+    butil::atomic<bool> _overcrowded;
 
     bool _fail_me_at_server_stop;
 
@@ -975,7 +989,7 @@ private:
     // Storing data that are not flushed into `fd' yet.
     butil::atomic<WriteRequest*> _write_head;
 
-    bool _is_write_shutdown;
+    butil::atomic<bool> _is_write_shutdown;
 
     butil::Mutex _stream_mutex;
     std::set<StreamId> *_stream_set;

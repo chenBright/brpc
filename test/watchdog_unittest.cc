@@ -4,6 +4,8 @@
 
 #include "butil/threading/watchdog.h"
 
+#include <atomic>
+
 #include "butil/logging.h"
 #include "butil/synchronization/spin_wait.h"
 #include "butil/threading/platform_thread.h"
@@ -26,17 +28,31 @@ class WatchdogCounter : public Watchdog {
         alarm_counter_(0) {
   }
 
-  virtual ~WatchdogCounter() {}
+  virtual ~WatchdogCounter() {
+    // Stop the watchdog thread before the derived object starts being
+    // destroyed, so that the watchdog thread cannot invoke the virtual
+    // Alarm() while the vptr is being rewritten to the base class. This
+    // avoids a TSan race report on the vptr between the watchdog thread's
+    // virtual call and the base class destructor.
+    Cleanup();
+    while (!IsJoinable()) {
+      PlatformThread::Sleep(TimeDelta::FromMilliseconds(1));
+    }
+  }
 
   virtual void Alarm() OVERRIDE {
-    alarm_counter_++;
+    alarm_counter_.fetch_add(1, std::memory_order_relaxed);
     Watchdog::Alarm();
   }
 
-  int alarm_counter() { return alarm_counter_; }
+  int alarm_counter() {
+    return alarm_counter_.load(std::memory_order_relaxed);
+  }
 
  private:
-  int alarm_counter_;
+  // Accessed concurrently by the watchdog thread (writer) and the test
+  // thread (reader); use std::atomic to avoid a data race.
+  std::atomic<int> alarm_counter_;
 
   DISALLOW_COPY_AND_ASSIGN(WatchdogCounter);
 };

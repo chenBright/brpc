@@ -1336,7 +1336,15 @@ int Controller::HandleSocketFailed(bthread_id_t id, void* data, int error_code,
 CallId Controller::call_id() {
     butil::atomic<uint64_t>* target =
         (butil::atomic<uint64_t>*)&_correlation_id.value;
-    uint64_t loaded = target->load(butil::memory_order_relaxed);
+    // Use acquire/release rather than relaxed: the bthread::Id object (and its
+    // FastPthreadMutex) is constructed by bthread_id_create2() below before the
+    // id value is published into `_correlation_id`. Another thread (e.g. a
+    // ParallelChannel sibling cancelling this sub call via bthread_id_error())
+    // may concurrently call call_id() on the same Controller, observe the
+    // published id and immediately dereference the Id object. A release store
+    // here paired with the acquire load makes the Id construction happen-before
+    // those accesses, avoiding a data race on the Id/mutex.
+    uint64_t loaded = target->load(butil::memory_order_acquire);
     if (loaded) {
         const CallId id = { loaded };
         return id;
@@ -1346,7 +1354,8 @@ CallId Controller::call_id() {
     // The range of this id will be reset in Channel::CallMethod
     CHECK_EQ(0, bthread_id_create2(&cid, this, HandleSocketFailed));
     if (!target->compare_exchange_strong(loaded, cid.value,
-                                         butil::memory_order_relaxed)) {
+                                         butil::memory_order_release,
+                                         butil::memory_order_acquire)) {
         bthread_id_cancel(cid);
         cid.value = loaded;
     }

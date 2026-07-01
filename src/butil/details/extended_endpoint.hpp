@@ -268,9 +268,27 @@ private:
 public:
 
     void dec_ref(void) {
-        int64_t old_ref = _ref_count.fetch_sub(1, butil::memory_order_relaxed);
+        // The reference count must use release/acquire ordering. Every access
+        // made by other reference holders (e.g. reading _u in to() or _id in
+        // embed_to()) has to happen-before the teardown below. Otherwise the
+        // last releaser may clear _u and return the ResourcePool slot (which is
+        // then reused and rewritten by another thread through
+        // new_extended_endpoint()) while a previous holder is still reading the
+        // very same memory, which ThreadSanitizer reports as a data race.
+        //
+        // Under ThreadSanitizer the standalone atomic_thread_fence(acquire) is
+        // unsupported, so the acquire fence is folded into the RMW via acq_rel
+        // (same idiom as butil::SharedObject::RemoveRefManually()).
+#if defined(BUTIL_USE_TSAN)
+        int64_t old_ref = _ref_count.fetch_sub(1, butil::memory_order_acq_rel);
+#else
+        int64_t old_ref = _ref_count.fetch_sub(1, butil::memory_order_release);
+#endif
         CHECK(old_ref >= 1) << "ExtendedEndPoint has unexpected reference " << old_ref;
         if (old_ref == 1) {
+#if !defined(BUTIL_USE_TSAN)
+            butil::atomic_thread_fence(butil::memory_order_acquire);
+#endif
             global_set()->erase(this);
             _u.sa.sa_family = AF_UNSPEC;
             ::butil::return_resource(_id);
@@ -343,7 +361,11 @@ inline ExtendedEndPoint* GlobalEndPointSet::insert(ExtendedEndPoint* p) {
     std::unique_lock<std::mutex> lock(_mutex);
     auto it = _set.find(p);
     if (it != _set.end()) {
-        if ((*it)->_ref_count.fetch_add(1, butil::memory_order_relaxed) == 0) {
+        // Acquire pairs with the release in dec_ref(): if we end up reusing the
+        // existing endpoint we must observe its fully-published content, and the
+        // "being destroyed" detection (seen ref == 0) has to synchronize with
+        // the releasing decrement so the decision is made on a coherent state.
+        if ((*it)->_ref_count.fetch_add(1, butil::memory_order_acquire) == 0) {
             // another thread is calling dec_ref(), do not reuse it
             (*it)->_ref_count.fetch_sub(1, butil::memory_order_relaxed);
             _set.erase(it);

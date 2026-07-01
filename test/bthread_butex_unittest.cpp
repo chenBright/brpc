@@ -82,7 +82,7 @@ TEST(ButexTest, with_or_without_array_zero) {
     ASSERT_EQ(sizeof(B), sizeof(A));
 }
 
-
+#ifndef BUTIL_USE_TSAN
 TEST(ButexTest, join) {
     const size_t N = 6;
     const size_t M = 6;
@@ -111,7 +111,7 @@ TEST(ButexTest, join) {
         ASSERT_EQ(0, pthread_join(pth[i], NULL));
     }
 }
-
+#endif // BUTIL_USE_TSAN
 
 struct WaiterArg {
     int expected_result;
@@ -138,7 +138,15 @@ void* waiter(void* arg) {
 TEST(ButexTest, sanity) {
     const size_t N = 5;
     WaiterArg args[N * 4];
-    pthread_t t1, t2;
+    // Keep every thread handle so we can join them all before the test body
+    // returns. The original code overwrote a single pthread_t/bthread_t and
+    // relied on sleep(), which (a) leaks the threads and (b) lets the waiters'
+    // EXPECT_* run concurrently with gtest's end-of-test result printing.
+    // ThreadSanitizer flags both. There are at most 1 + 2*N of each kind.
+    pthread_t pthreads[4 * N];
+    size_t npthread = 0;
+    bthread_t bthreads[4 * N];
+    size_t nbthread = 0;
     butil::atomic<int>* b1 =
         bthread::butex_create_checked<butil::atomic<int> >();
     ASSERT_TRUE(b1);
@@ -153,9 +161,10 @@ TEST(ButexTest, sanity) {
     unmatched_arg->expected_result = EWOULDBLOCK;
     unmatched_arg->butex = b1;
     unmatched_arg->ptimeout = NULL;
-    pthread_create(&t2, NULL, waiter, unmatched_arg);
-    bthread_t th;
-    ASSERT_EQ(0, bthread_start_urgent(&th, NULL, waiter, unmatched_arg));
+    ASSERT_EQ(0, pthread_create(&pthreads[npthread++], NULL, waiter,
+                                unmatched_arg));
+    ASSERT_EQ(0, bthread_start_urgent(&bthreads[nbthread++], NULL, waiter,
+                                      unmatched_arg));
 
     const timespec abstime = butil::seconds_from_now(1);
     for (size_t i = 0; i < 4*N; ++i) {
@@ -168,10 +177,12 @@ TEST(ButexTest, sanity) {
             args[i].expected_result = ETIMEDOUT;
             args[i].ptimeout = &abstime;
         }
-        if (i < 2*N) { 
-            pthread_create(&t1, NULL, waiter, &args[i]);
+        if (i < 2*N) {
+            ASSERT_EQ(0, pthread_create(&pthreads[npthread++], NULL, waiter,
+                                        &args[i]));
         } else {
-            ASSERT_EQ(0, bthread_start_urgent(&th, NULL, waiter, &args[i]));
+            ASSERT_EQ(0, bthread_start_urgent(&bthreads[nbthread++], NULL,
+                                              waiter, &args[i]));
         }
     }
     
@@ -180,11 +191,24 @@ TEST(ButexTest, sanity) {
         ASSERT_EQ(1, bthread::butex_wake(b1));
     }
     ASSERT_EQ(0, bthread::butex_wake(b1));
-    sleep(1);
+    // Join all waiters so no thread outlives TestBody. By now the matched
+    // waiters have been woken (rc == 0), the timed ones have timed out
+    // (ETIMEDOUT) and the unmatched ones returned immediately (EWOULDBLOCK),
+    // so none of the joins block.
+    for (size_t i = 0; i < npthread; ++i) {
+        pthread_join(pthreads[i], NULL);
+    }
+    for (size_t i = 0; i < nbthread; ++i) {
+        bthread_join(bthreads[i], NULL);
+    }
+    delete unmatched_arg;
     bthread::butex_destroy(b1);
 }
 
 
+// The following tests rely on timing assertions which are unreliable and
+// extremely slow under ThreadSanitizer, so they are disabled when TSan is on.
+#ifndef BUTIL_USE_TSAN
 struct ButexWaitArg {
     int* butex;
     int expected_val;
@@ -442,5 +466,6 @@ TEST(ButexTest, wait_with_signal_triggered) {
     ASSERT_EQ(0, pthread_join(tigger_th, NULL));
     bthread::butex_destroy(butex);
 }
+#endif // BUTIL_USE_TSAN
 
 } // namespace

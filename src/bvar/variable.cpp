@@ -22,6 +22,7 @@
 #include <fstream>                              // std::ifstream
 #include <sstream>                              // std::ostringstream
 #include <gflags/gflags.h>
+#include "butil/atomicops.h"                      // butil::atomic
 #include "butil/macros.h"                        // BAIDU_CASSERT
 #include "butil/containers/flat_map.h"           // butil::FlatMap
 #include "butil/scoped_lock.h"                   // BAIDU_SCOPE_LOCK
@@ -240,7 +241,9 @@ size_t Variable::count_exposed() {
     size_t n = 0;
     VarMapWithLock* var_maps = get_var_maps();
     for (size_t i = 0; i < SUB_MAP_COUNT; ++i) {
-        n += var_maps[i].size();
+        VarMapWithLock& m = var_maps[i];
+        BAIDU_SCOPED_LOCK(m.mutex);
+        n += m.size();
     }
     return n;
 }
@@ -695,6 +698,13 @@ static pthread_once_t dumping_thread_once = PTHREAD_ONCE_INIT;
 static bool created_dumping_thread = false;
 static pthread_mutex_t dump_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t dump_cond = PTHREAD_COND_INITIALIZER;
+// Id of the background dumping thread, used to join it on exit.
+static pthread_t dumping_thread_id;
+// Notify the dumping thread to stop. It MUST be stopped before the gflags
+// (e.g. string flags accessed via GetCommandLineOption) are destructed at
+// program exit, otherwise the running thread would touch freed memory and
+// trigger heap-use-after-free.
+static butil::atomic<bool> stop_dumping_thread(false);
 
 DEFINE_bool(bvar_dump, false,
             "Create a background thread dumping all bvar periodically, "
@@ -734,7 +744,7 @@ static void* dumping_thread(void*) {
     const std::string command_name = read_command_name();
     std::string last_filename;
     std::string mbvar_last_filename;
-    while (1) {
+    while (!stop_dumping_thread.load(butil::memory_order_relaxed)) {
         // We can't access string flags directly because it's thread-unsafe.
         std::string filename;
         DumpOptions options;
@@ -855,19 +865,38 @@ static void* dumping_thread(void*) {
         pthread_mutex_lock(&dump_mutex);
         pthread_cond_timedwait(&dump_cond, &dump_mutex, &deadline);
         pthread_mutex_unlock(&dump_mutex);
+        // Stop right after waking up so that we don't access any gflag (which
+        // may have been destructed at program exit) in the next iteration.
+        if (stop_dumping_thread.load(butil::memory_order_relaxed)) {
+            break;
+        }
         usleep(post_sleep_ms * 1000);
     }
+    return NULL;
+}
+
+// Stop and join the dumping thread. Registered via atexit() when the thread
+// is launched, so that the thread is guaranteed to be stopped before gflags
+// are destructed (atexit/__cxa_atexit callbacks run in reverse order, and
+// this callback is registered later than the gflags destructors which are
+// registered during static initialization).
+static void join_dumping_thread() {
+    stop_dumping_thread.store(true, butil::memory_order_relaxed);
+    pthread_mutex_lock(&dump_mutex);
+    pthread_cond_signal(&dump_cond);
+    pthread_mutex_unlock(&dump_mutex);
+    pthread_join(dumping_thread_id, NULL);
 }
 
 static void launch_dumping_thread() {
-    pthread_t thread_id;
-    int rc = pthread_create(&thread_id, NULL, dumping_thread, NULL);
+    int rc = pthread_create(&dumping_thread_id, NULL, dumping_thread, NULL);
     if (rc != 0) {
         LOG(FATAL) << "Fail to launch dumping thread: " << berror(rc);
         return;
     }
-    // Detach the thread because no one would join it.
-    CHECK_EQ(0, pthread_detach(thread_id));
+    // Make sure the thread is stopped and joined before the process exits to
+    // avoid heap-use-after-free on gflags accessed inside the thread.
+    atexit(join_dumping_thread);
     created_dumping_thread = true;
 }
 
