@@ -18,7 +18,6 @@
 // bthread - An M:N threading library to make applications more concurrent.
 
 
-#include <queue>                           // heap functions
 #include <gflags/gflags.h>
 #include "butil/scoped_lock.h"
 #include "butil/logging.h"
@@ -46,24 +45,22 @@ TimerThreadOptions::TimerThreadOptions()
 // A task contains the necessary information for running fn(arg).
 // Tasks are created in Bucket::schedule and destroyed in TimerThread::run
 struct BAIDU_CACHELINE_ALIGNMENT TimerThread::Task {
-    Task* next;                 // For linking tasks in a Bucket.
-    int64_t run_time;           // run the task at this realtime
-    void (*fn)(void*);          // the fn(arg) to run
-    void* arg;
+    Task* next{NULL}; // For linking tasks in a Bucket.
+    int64_t run_time{0}; // run the task at this realtime
+    void (*fn)(void*){NULL}; // the fn(arg) to run
+    void* arg{NULL};
     // Current TaskId, checked against version in TimerThread::run to test
     // if this task is unscheduled.
-    TaskId task_id;
+    TaskId task_id{0};
     // initial_version:     not run yet
     // initial_version + 1: running
     // initial_version + 2: removed (also the version of next Task reused
     //                      this struct)
-    butil::atomic<uint32_t> version;
-
-    Task() : version(2/*skip 0*/) {}
+    butil::atomic<uint32_t> version{2/*skip 0*/};
 
     // Run this task and delete this struct.
     // Returns true if fn(arg) did run.
-    bool run_and_delete();
+    bool run_and_delete(bvar::LatencyRecorder& task_latency);
 
     // Delete this struct if this task was unscheduled.
     // Returns true on deletion.
@@ -276,13 +273,15 @@ int TimerThread::unschedule(TaskId task_id) {
     return (expected_version == id_version + 1) ? 1 : -1;
 }
 
-bool TimerThread::Task::run_and_delete() {
+bool TimerThread::Task::run_and_delete(bvar::LatencyRecorder& task_latency) {
     const uint32_t id_version = version_of_task_id(task_id);
     uint32_t expected_version = id_version;
     // This CAS is rarely contended, should be fast.
-    if (version.compare_exchange_strong(
-            expected_version, id_version + 1, butil::memory_order_relaxed)) {
+    if (version.compare_exchange_strong(expected_version, id_version + 1,
+                                        butil::memory_order_relaxed)) {
+        int64_t start_ns = butil::cpuwide_time_ns();
         fn(arg);
+        task_latency << butil::cpuwide_time_ns() - start_ns;
         // The release fence is paired with acquire fence in
         // TimerThread::unschedule to make changes of fn(arg) visible.
         version.store(id_version + 2, butil::memory_order_release);
@@ -338,10 +337,12 @@ void TimerThread::run() {
     double busy_seconds = 0;
     bvar::PassiveStatus<double> busy_seconds_var(deref_value<double>, &busy_seconds);
     bvar::PerSecond<bvar::PassiveStatus<double> > busy_seconds_second(&busy_seconds_var);
+    bvar::LatencyRecorder task_latency;
     if (!_options.bvar_prefix.empty()) {
         nscheduled_second.expose_as(_options.bvar_prefix, "scheduled_second");
         ntriggered_second.expose_as(_options.bvar_prefix, "triggered_second");
         busy_seconds_second.expose_as(_options.bvar_prefix, "usage");
+        task_latency.expose(_options.bvar_prefix, "task");
     }
     
     while (!_stop.load(butil::memory_order_relaxed)) {
@@ -400,7 +401,7 @@ void TimerThread::run() {
             }
             std::pop_heap(tasks.begin(), tasks.end(), task_greater);
             tasks.pop_back();
-            if (task1->run_and_delete()) {
+            if (task1->run_and_delete(task_latency)) {
                 ++ntriggered;
             }
         }
