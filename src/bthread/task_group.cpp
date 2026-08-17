@@ -520,9 +520,18 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
 #ifdef BRPC_BTHREAD_TRACER
             tracing = TaskTracer::set_end_status_unsafe(m);
 #endif // BRPC_BTHREAD_TRACER
-            if (0 == ++*m->version_butex) {
-                ++*m->version_butex;
+            // Bump the version with a release store so that it pairs with the
+            // acquire load in TaskGroup::join(): all memory writes made by this
+            // bthread become visible to the joining thread. Accessing
+            // version_butex atomically also avoids a data race with the read in
+            // join(). This path is the only writer of version_butex at runtime.
+            auto* version = reinterpret_cast<butil::atomic<int>*>(m->version_butex);
+            uint32_t next_version = static_cast<uint32_t>(
+                version->load(butil::memory_order_relaxed)) + 1;
+            if (0 == next_version) {
+                ++next_version;
             }
+            version->store(static_cast<int>(next_version), butil::memory_order_release);
         }
         butex_wake_except(m->version_butex, 0);
 
@@ -709,16 +718,18 @@ int TaskGroup::join(bthread_t tid, void** return_value) {
         return EINVAL;
     }
     const uint32_t expected_version = get_version(tid);
-    while (*m->version_butex == expected_version) {
-        if (butex_wait(m->version_butex, expected_version, NULL) < 0 &&
+    // Acquire load pairs with the release store performed when the joined
+    // bthread ends (see the version bump above), ensuring all of its memory
+    // writes are visible after join() returns. This matches the semantic
+    // guarantee provided by pthread_join() across supported architectures.
+    auto* version = reinterpret_cast<butil::atomic<int>*>(m->version_butex);
+    const int expected_version_int = static_cast<int>(expected_version);
+    while (version->load(butil::memory_order_acquire) == expected_version_int) {
+        if (butex_wait(m->version_butex, expected_version_int, NULL) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
         }
     }
-    // Ensure all memory writes made by the joined bthread are visible to
-    // the joining thread after join returns. This matches the semantic
-    // guarantee provided by pthread_join() across supported architectures.
-    butil::atomic_thread_fence(butil::memory_order_acquire);
     if (return_value) {
         *return_value = NULL;
     }
