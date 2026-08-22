@@ -523,10 +523,18 @@ public:
     }
     VoidOp inv_op() const { return VoidOp(); }
 
+    // Expose the shared data carrier, so that ReducerSampler holds it instead
+    // of `this'. Sampling then keeps reading valid memory even if this
+    // Percentile is destructed before the sampler is recycled.
+    shared_combiner_type share_combiner() const { return _combiner; }
+
     // The sampler for windows over percentile.
     sampler_type* get_sampler() {
         if (nullptr == _sampler) {
             _sampler = new sampler_type(this);
+            // Percentile is not a Variable, use its debug name for diagnostics.
+            // It may still be empty here and get filled by set_debug_name().
+            _sampler->set_debug_name(_debug_name);
             _sampler->schedule();
         }
         return _sampler;
@@ -543,6 +551,12 @@ public:
     // This name is useful for warning negative latencies in operator<<
     void set_debug_name(const butil::StringPiece& name) {
         _debug_name.assign(name.data(), name.size());
+        if (nullptr != _sampler) {
+            // The sampler may have been created before the name was known (e.g.
+            // LatencyRecorder names its members only when exposed), keep the
+            // name used for diagnostics in sync.
+            _sampler->set_debug_name(_debug_name);
+        }
     }
 
 private:
@@ -591,6 +605,9 @@ public:
     sampler_type* get_sampler() {
         if (nullptr == _sampler) {
             _sampler = new sampler_type(this);
+            // Percentile is not a Variable, use its debug name for diagnostics.
+            // It may still be empty here and get filled by set_debug_name().
+            _sampler->set_debug_name(_debug_name);
             _sampler->schedule();
         }
         return _sampler;
@@ -610,6 +627,11 @@ public:
     // This name is useful for warning negative latencies in operator<<
     void set_debug_name(const butil::StringPiece& name) {
         _debug_name.assign(name.data(), name.size());
+        if (nullptr != _sampler) {
+            // Keep the name used for diagnostics in sync, see the non-babylon
+            // Percentile for details.
+            _sampler->set_debug_name(_debug_name);
+        }
     }
 
 private:
