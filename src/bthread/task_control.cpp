@@ -88,8 +88,9 @@ void run_tagged_worker_startfn(bthread_tag_t tag) {
 }
 
 struct WorkerThreadArgs {
-    WorkerThreadArgs(TaskControl* _c, bthread_tag_t _t) : c(_c), tag(_t) {}
-    TaskControl* c;
+    WorkerThreadArgs(TaskControl* c, bthread_tag_t t)
+        : task_control(c), tag(t) {}
+    TaskControl* task_control;
     bthread_tag_t tag;
 };
 
@@ -100,13 +101,13 @@ void* TaskControl::worker_thread(void* arg) {
 #endif
 
     auto dummy = static_cast<WorkerThreadArgs*>(arg);
-    auto c = dummy->c;
+    auto c = dummy->task_control;
     auto tag = dummy->tag;
     delete dummy;
     run_tagged_worker_startfn(tag);
 
     TaskGroup* g = c->create_group(tag);
-    TaskStatistics stat;
+    TaskStatistics stat{};
     if (nullptr == g) {
         LOG(ERROR) << "Fail to create TaskGroup in pthread=" << pthread_self();
         return nullptr;
@@ -115,8 +116,7 @@ void* TaskControl::worker_thread(void* arg) {
     g->_tid = pthread_self();
     // tag_wid is a per-tag monotonic counter: same-tag workers get 0,1,2,...
     // Used both for CPU round-robin affinity and the thread name suffix.
-    int tag_wid = c->_tag_next_worker_id[tag].fetch_add(
-                      1, butil::memory_order_relaxed);
+    int tag_wid = c->_tag_next_worker_id[tag].fetch_add(1, butil::memory_order_relaxed);
     if (!c->_tag_cpus[tag].empty()) {
         const auto& cpus = c->_tag_cpus[tag];
         bind_thread_to_cpu(pthread_self(), cpus[tag_wid % cpus.size()]);
@@ -196,6 +196,9 @@ TaskControl::TaskControl()
     , _init(false)
     , _stop(false)
     , _concurrency(0)
+    , _tagged_nworker(FLAGS_task_group_ntags)
+    , _nreserved(0)
+    , _tagged_nreserved(FLAGS_task_group_ntags)
     , _nworkers("bthread_worker_count")
     , _pending_time(nullptr)
       // Delay exposure of following two vars because they rely on TC which
@@ -257,6 +260,8 @@ int TaskControl::init(int concurrency) {
     // task group group by tags
     for (int i = 0; i < FLAGS_task_group_ntags; ++i) {
         _tagged_ngroup[i].store(0, std::memory_order_relaxed);
+        _tagged_nworker[i].store(0, std::memory_order_relaxed);
+        _tagged_nreserved[i].store(0, std::memory_order_relaxed);
         auto tag_str = std::to_string(i);
         _tagged_nworkers.emplace_back(
             std::make_unique<bvar::Adder<int64_t>>("bthread_worker_count", tag_str));
@@ -293,13 +298,16 @@ int TaskControl::init(int concurrency) {
     
     _workers.resize(_concurrency);
     for (int i = 0; i < _concurrency; ++i) {
-        auto arg = new WorkerThreadArgs(this, i % FLAGS_task_group_ntags);
-        const int rc = pthread_create(&_workers[i], nullptr, worker_thread, arg);
+        const bthread_tag_t tag = i % FLAGS_task_group_ntags;
+        _tagged_nworker[tag].fetch_add(1, butil::memory_order_release);
+        auto arg = std::make_unique<WorkerThreadArgs>(this, tag);
+        const int rc = pthread_create(&_workers[i], nullptr, worker_thread, arg.get());
         if (rc) {
-            delete arg;
             PLOG(ERROR) << "Fail to create _workers[" << i << "]";
             return -1;
         }
+        // The worker owns the args from now on and deletes them itself.
+        arg.release();
     }
     _worker_usage_second.expose("bthread_worker_usage");
     _switch_per_second.expose("bthread_switch_second");
@@ -322,9 +330,26 @@ int TaskControl::init(int concurrency) {
     return 0;
 }
 
-int TaskControl::add_workers(int num, bthread_tag_t tag) {
+int TaskControl::add_workers(int num, bthread_tag_t tag, bool reserved) {
     if (num <= 0) {
         return 0;
+    }
+    // _tagged_groups[tag] holds at most BTHREAD_MAX_CONCURRENCY groups and
+    // _add_group() has to drop the ones beyond that, leaving a worker whose
+    // TaskGroup choose_one_group() can never hand a bthread to. Clamp here, the
+    // only place workers are created: the `num' of bthread_setconcurrency*()
+    // excludes the reserved workers, so it alone no longer bounds the total.
+    const int room = BTHREAD_MAX_CONCURRENCY - concurrency(tag);
+    if (num > room) {
+        LOG_EVERY_SECOND(WARNING)
+            << "Truncated the # of workers to add for tag=" << tag << " from "
+            << num << " to " << (room > 0 ? room : 0) << ", a tag cannot have"
+               " more than BTHREAD_MAX_CONCURRENCY=" << BTHREAD_MAX_CONCURRENCY
+            << " workers, reserved ones included";
+        num = room;
+        if (num <= 0) {
+            return 0;
+        }
     }
     try {
         _workers.resize(_concurrency + num);
@@ -336,15 +361,27 @@ int TaskControl::add_workers(int num, bthread_tag_t tag) {
         // Worker will add itself to _idle_workers, so we have to add
         // _concurrency before create a worker.
         _concurrency.fetch_add(1);
-        auto arg = new WorkerThreadArgs(this, tag);
+        _tagged_nworker[tag].fetch_add(1, butil::memory_order_release);
+        // Keep the reserved counters in step with the totals above, so that
+        // usable_concurrency() is never off.
+        if (reserved) {
+            _nreserved.fetch_add(1, butil::memory_order_release);
+            _tagged_nreserved[tag].fetch_add(1, butil::memory_order_release);
+        }
+        auto arg = std::make_unique<WorkerThreadArgs>(this, tag);
         const int rc = pthread_create(
-                &_workers[i + old_concurency], nullptr, worker_thread, arg);
+                &_workers[i + old_concurency], nullptr, worker_thread, arg.get());
         if (rc) {
-            delete arg;
             PLOG(WARNING) << "Fail to create _workers[" << i + old_concurency << "]";
+            if (reserved) {
+                _tagged_nreserved[tag].fetch_sub(1, butil::memory_order_relaxed);
+                _nreserved.fetch_sub(1, butil::memory_order_relaxed);
+            }
+            _tagged_nworker[tag].fetch_sub(1, butil::memory_order_release);
             _concurrency.fetch_sub(1, butil::memory_order_release);
             break;
         }
+        arg.release();
     }
     // Cannot fail
     _workers.resize(_concurrency.load(butil::memory_order_relaxed));
@@ -560,6 +597,10 @@ int TaskControl::_add_group(TaskGroup* g, bthread_tag_t tag) {
     if (ngroup < (size_t)BTHREAD_MAX_CONCURRENCY) {
         _tagged_groups[tag][ngroup] = g;
         _tagged_ngroup[tag].store(ngroup + 1, butil::memory_order_release);
+    } else {
+        LOG(ERROR) << "Fail to add TaskGroup to tag=" << tag << ", already "
+                   << ngroup << " groups >= BTHREAD_MAX_CONCURRENCY="
+                   << BTHREAD_MAX_CONCURRENCY;
     }
     mu.unlock();
     // See the comments in _destroy_group
@@ -682,13 +723,16 @@ void TaskControl::signal_task(int num_task, bthread_tag_t tag) {
             start_index = 0;
         }
     }
+    // Reserved workers are not part of FLAGS_bthread_concurrency, so the cap
+    // of the lazy growth is the configured concurrency plus the reservation.
+    const int max_concurrency = FLAGS_bthread_concurrency + nreserved();
     if (num_task > 0 &&
         FLAGS_bthread_min_concurrency > 0 &&    // test min_concurrency for performance
-        _concurrency.load(butil::memory_order_relaxed) < FLAGS_bthread_concurrency) {
+        _concurrency.load(butil::memory_order_relaxed) < max_concurrency) {
         // TODO: Reduce this lock
         BAIDU_SCOPED_LOCK(g_task_control_mutex);
-        if (_concurrency.load(butil::memory_order_acquire) < FLAGS_bthread_concurrency) {
-            add_workers(1, tag);
+        if (_concurrency.load(butil::memory_order_acquire) < max_concurrency) {
+            add_workers(1, tag, false);
         }
     }
 }

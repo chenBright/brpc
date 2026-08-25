@@ -581,6 +581,8 @@ NOTE: ServerOptions.num_threads is just a **hint**.
 
 Don't think that Server uses exactly so many workers because all servers and channels in one process share worker pthreads. Total number of threads is the maximum of all ServerOptions.num_threads and bthread_concurrency.  For example, a program has 2 servers with num_threads=24 and 36 respectively, and bthread_concurrency is 16. Then the number of worker pthreads is max (24, 36, 16) = 36, which is different from other RPC implementations which do summations generally.
 
+NOTE: the event dispatchers (-event_dispatcher_num of them per tag) and bthread's internal epoll thread run an event loop that never returns: they wait in epoll_wait/kevent when idle and dispatch the events in place otherwise. As bthreads are not preemptible, in neither state does the worker pthread carrying them get to run another bthread, so it is effectively dedicated to them. Each of them therefore reserves one **extra** worker which is not part of the maximum above. In other words the real number of worker pthreads is `max(all num_threads, -bthread_concurrency) + reserved`, while `num_threads` / `-bthread_concurrency` always mean the number of workers **available to ordinary bthreads**. The real number is reported by the bvar `bthread_worker_count`.
+
 Channel does not have a corresponding option, but user can change number of worker pthreads at client-side by setting gflag -bthread_concurrency.
 
 In addition, brpc **does not separate "IO" and "processing" threads**. brpc knows how to assemble IO and processing code together to achieve better concurrency and efficiency.

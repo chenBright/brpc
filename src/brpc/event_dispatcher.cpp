@@ -62,6 +62,24 @@ void InitializeGlobalDispatchers() {
     g_edisp_write_lantency = new bvar::LatencyRecorder("event_dispatcher_write");
 
     g_edisp = new EventDispatcher[FLAGS_task_group_ntags * FLAGS_event_dispatcher_num];
+    // A dispatcher bthread loops over epoll_wait/kevent and never returns to the
+    // scheduler, so its worker pthread is its own for good, whether it is blocked
+    // in the syscall or dispatching the events it returned. Give each of them a
+    // dedicated worker instead of eating into the concurrency configured by the
+    // user (ServerOptions.num_threads or -bthread_concurrency). Otherwise a process
+    // with event_dispatcher_num >= num_threads has no worker left to run anything
+    // else and deadlocks.
+    for (int i = 0; i < FLAGS_task_group_ntags; ++i) {
+        bthread_tag_t tag = (BTHREAD_TAG_DEFAULT + i) % FLAGS_task_group_ntags;
+        int rc = bthread_reserve_concurrency_by_tag(FLAGS_event_dispatcher_num, tag);
+        if (rc != 0) {
+            LOG(WARNING) << "Fail to reserve " << FLAGS_event_dispatcher_num
+                         << " workers for event dispatchers of tag=" << tag
+                         << ": " << berror(rc) << ". They will consume the "
+                            "configured concurrency instead, consider lowering "
+                            "-event_dispatcher_num.";
+        }
+    }
     for (int i = 0; i < FLAGS_task_group_ntags; ++i) {
         for (int j = 0; j < FLAGS_event_dispatcher_num; ++j) {
             bthread_attr_t attr =
