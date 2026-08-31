@@ -457,6 +457,9 @@ void ProcessHuluRequest(InputMessageBase* msg_base) {
             sp->service->CallMethod(sp->method, cntl.get(), &breq, &bres, nullptr);
             break;
         }
+        if (RejectBuiltinAccess(cntl.get(), *server, sp)) {
+            break;
+        }
         if (socket->is_overcrowded() &&
             !server->options().ignore_eovercrowded &&
             !sp->ignore_eovercrowded) {

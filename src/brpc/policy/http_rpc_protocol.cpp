@@ -1620,10 +1620,7 @@ void ProcessHttpRequest(InputMessageBase *msg) {
         if (!server->AcceptRequest(cntl)) {
             return;
         }
-    } else if (security_mode) {
-        cntl->SetFailed(EPERM, "Not allowed to access builtin services, try "
-                        "ServerOptions.internal_port=%d instead if you're in"
-                        " internal network", server->options().internal_port);
+    } else if (RejectBuiltinAccess(cntl, *server, mp)) {
         return;
     }
 

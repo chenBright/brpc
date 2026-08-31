@@ -779,6 +779,9 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
                 mp->service->CallMethod(mp->method, cntl.get(), &breq, &bres, nullptr);
                 break;
             }
+            if (RejectBuiltinAccess(cntl.get(), *server, mp)) {
+                break;
+            }
             if (socket->is_overcrowded() &&
                 !server->options().ignore_eovercrowded &&
                 !mp->ignore_eovercrowded) {
