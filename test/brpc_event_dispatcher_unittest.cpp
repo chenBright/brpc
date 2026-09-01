@@ -23,16 +23,40 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <gtest/gtest.h>
+#include <gflags/gflags.h>
 #include "gperftools_helper.h"
 #include "butil/time.h"
 #include "butil/macros.h"
 #include "butil/fd_utility.h"
 #include "butil/memory/scope_guard.h"
 #include "bthread/bthread.h"
+#include "bthread/task_control.h"
+#include "brpc/channel.h"
+#include "brpc/controller.h"
 #include "brpc/event_dispatcher.h"
+#include "brpc/server.h"
 #include "brpc/socket.h"
 #include "brpc/details/has_epollrdhup.h"
 #include "brpc/versioned_ref_with_id.h"
+#include "echo.pb.h"
+
+DECLARE_int32(task_group_ntags);
+DECLARE_int32(event_dispatcher_num);
+
+namespace bthread {
+extern TaskControl* g_task_control;
+}
+
+// Far more dispatchers than the workers the reserve tests at the end of this
+// file configure, which is exactly the situation that used to deadlock.
+static const int NUM_EVENT_DISPATCHERS = 16;
+
+int main(int argc, char* argv[]) {
+    FLAGS_event_dispatcher_num = NUM_EVENT_DISPATCHERS;
+    testing::InitGoogleTest(&argc, argv);
+    GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    return RUN_ALL_TESTS();
+}
 
 class EventDispatcherTest : public ::testing::Test{
 protected:
@@ -531,4 +555,101 @@ TEST_F(EventDispatcherTest, customize_dispatch_task) {
     ptr.reset();
     ASSERT_EQ(nullptr, ptr);
     ASSERT_NE(0, EventPipe::Address(id, &ptr));
+}
+
+// If those workers were taken out of the concurrency configured by the user, a
+// process with event_dispatcher_num >= num_threads would have no worker left to
+// run anything else, and would never even be able to quit.
+
+// Must stay below NUM_EVENT_DISPATCHERS and above the default
+// -bthread_concurrency, as concurrency can only ever grow.
+static const int NUM_THREADS = 10;
+static const int RESERVE_PORT = 8798;
+
+class ReserveEchoServiceImpl : public test::EchoService {
+public:
+    void Echo(google::protobuf::RpcController*,
+              const test::EchoRequest* req,
+              test::EchoResponse* res,
+              google::protobuf::Closure* done) override {
+        brpc::ClosureGuard done_guard(done);
+        res->set_message(req->message());
+    }
+};
+
+struct StopArgs {
+    brpc::Server* server;
+    butil::atomic<bool> done;
+    explicit StopArgs(brpc::Server* s) : server(s), done(false) {}
+};
+
+void* stop_and_join(void* arg) {
+    StopArgs* args = static_cast<StopArgs*>(arg);
+    args->server->Stop(0);
+    args->server->Join();
+    args->done.store(true, butil::memory_order_release);
+    return nullptr;
+}
+
+// The dispatchers must be extra workers, not a slice of what the user asked for.
+TEST_F(EventDispatcherTest, dispatchers_do_not_consume_configured_concurrency) {
+    ASSERT_EQ(NUM_EVENT_DISPATCHERS, FLAGS_event_dispatcher_num);
+    // Force initialization of the global dispatchers.
+    brpc::GetGlobalEventDispatcher(0, BTHREAD_TAG_DEFAULT);
+    ASSERT_TRUE(bthread::g_task_control != nullptr);
+
+    const int expected = FLAGS_task_group_ntags * FLAGS_event_dispatcher_num;
+    // >= rather than ==: bthread::EpollThread reserves one as well, and it may
+    // or may not have been started by now.
+    ASSERT_GE(bthread::g_task_control->nreserved(), expected);
+    // Reserved workers are on top of the configured concurrency, not inside it.
+    const int usable = bthread_getconcurrency();
+    ASSERT_EQ(usable, bthread::g_task_control->usable_concurrency());
+    ASSERT_GE(bthread::g_task_control->concurrency(), usable + expected);
+}
+
+// End-to-end: a server whose num_threads is smaller than the number of event
+// dispatchers must still serve requests and, crucially, be able to quit.
+TEST_F(EventDispatcherTest, server_with_fewer_threads_than_dispatchers_can_quit) {
+    brpc::Server server;
+    ReserveEchoServiceImpl service;
+    ASSERT_EQ(0, server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE));
+    brpc::ServerOptions options;
+    options.num_threads = NUM_THREADS;
+    ASSERT_EQ(0, server.Start(RESERVE_PORT, &options));
+    // num_threads workers are available to ordinary bthreads, on top of the
+    // ones reserved for the dispatchers.
+    ASSERT_EQ(NUM_THREADS, bthread_getconcurrency_by_tag(BTHREAD_TAG_DEFAULT));
+
+    brpc::Channel channel;
+    brpc::ChannelOptions copt;
+    copt.timeout_ms = 3000;
+    butil::EndPoint ep;
+    ASSERT_EQ(0, butil::str2endpoint("127.0.0.1", RESERVE_PORT, &ep));
+    ASSERT_EQ(0, channel.Init(ep, &copt));
+
+    test::EchoService_Stub stub(&channel);
+    for (int i = 0; i < 20; ++i) {
+        brpc::Controller cntl;
+        test::EchoRequest req;
+        test::EchoResponse res;
+        req.set_message("hello");
+        stub.Echo(&cntl, &req, &res, nullptr);
+        ASSERT_FALSE(cntl.Failed()) << cntl.ErrorText();
+        ASSERT_EQ("hello", res.message());
+    }
+
+    // This is what used to hang: Stop()/Join() need bthreads to be scheduled,
+    // and every worker was stuck in epoll_wait.
+    StopArgs args(&server);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, nullptr, stop_and_join, &args));
+    const int64_t deadline_us = butil::gettimeofday_us() + 10 * 1000000L;
+    while (!args.done.load(butil::memory_order_acquire) &&
+           butil::gettimeofday_us() < deadline_us) {
+        usleep(10000);
+    }
+    ASSERT_TRUE(args.done.load(butil::memory_order_acquire))
+        << "Server::Stop()/Join() did not finish in 10s, no worker available?";
+    ASSERT_EQ(0, pthread_join(th, nullptr));
 }

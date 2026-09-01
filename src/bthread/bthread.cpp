@@ -44,20 +44,21 @@ static bool validate_bthread_min_concurrency(const char*, int32_t val);
 static bool validate_bthread_current_tag(const char*, int32_t val);
 static bool validate_bthread_concurrency_by_tag(const char*, int32_t val);
 
-DEFINE_int32(bthread_concurrency, 8 + BTHREAD_EPOLL_THREAD_NUM,
-             "Number of pthread workers");
+DEFINE_int32(bthread_concurrency, 8, "Number of pthread workers available "
+                                     "to ordinary bthreads.");
 BUTIL_VALIDATE_GFLAG(bthread_concurrency, validate_bthread_concurrency);
 
 DEFINE_int32(bthread_min_concurrency, 0,
             "Initial number of pthread workers which will be added on-demand."
             " The laziness is disabled when this value is non-positive,"
-            " and workers will be created eagerly according to -bthread_concurrency and bthread_setconcurrency(). ");
+            " and workers will be created eagerly according to "
+            "-bthread_concurrency and bthread_setconcurrency(). ");
 BUTIL_VALIDATE_GFLAG(bthread_min_concurrency, validate_bthread_min_concurrency);
 
 DEFINE_int32(bthread_current_tag, BTHREAD_TAG_INVALID, "Set bthread concurrency for this tag");
 BUTIL_VALIDATE_GFLAG(bthread_current_tag, validate_bthread_current_tag);
 
-DEFINE_int32(bthread_concurrency_by_tag, 8 + BTHREAD_EPOLL_THREAD_NUM,
+DEFINE_int32(bthread_concurrency_by_tag, 8,
              "Number of pthread workers of FLAGS_bthread_current_tag");
 BUTIL_VALIDATE_GFLAG(bthread_concurrency_by_tag, validate_bthread_concurrency_by_tag);
 
@@ -213,7 +214,7 @@ static int add_workers_for_each_tag(int num) {
     int added = 0;
     auto c = get_task_control();
     for (auto i = 0; i < num; ++i) {
-        added += c->add_workers(1, i % FLAGS_task_group_ntags);
+        added += c->add_workers(1, i % FLAGS_task_group_ntags, false);
     }
     return added;
 }
@@ -230,9 +231,9 @@ static bool validate_bthread_min_concurrency(const char*, int32_t val) {
         return true;
     }
     BAIDU_SCOPED_LOCK(g_task_control_mutex);
-    int concurrency = c->concurrency();
+    int concurrency = c->usable_concurrency();
     if (val > concurrency) {
-        int added = bthread::add_workers_for_each_tag(val - concurrency);
+        int added = add_workers_for_each_tag(val - concurrency);
         return added == (val - concurrency);
     } else {
         return true;
@@ -245,13 +246,13 @@ static bool validate_bthread_current_tag(const char*, int32_t val) {
     } else if (val < BTHREAD_TAG_DEFAULT || val >= FLAGS_task_group_ntags) {
         return false;
     }
-    BAIDU_SCOPED_LOCK(bthread::g_task_control_mutex);
+    BAIDU_SCOPED_LOCK(g_task_control_mutex);
     auto c = get_task_control();
     if (c == nullptr) {
-        FLAGS_bthread_concurrency_by_tag = 8 + BTHREAD_EPOLL_THREAD_NUM;
+        FLAGS_bthread_concurrency_by_tag = 8;
         return true;
     }
-    FLAGS_bthread_concurrency_by_tag = c->concurrency(val);
+    FLAGS_bthread_concurrency_by_tag = c->usable_concurrency(val);
     return true;
 }
 
@@ -312,7 +313,7 @@ struct TidTraits {
     static const size_t MAX_ENTRIES = 65536;
     static const size_t INIT_GC_SIZE = 65536;
     static const bthread_t ID_INIT;
-    static bool exists(bthread_t id) { return bthread::TaskGroup::exists(id); }
+    static bool exists(bthread_t id) { return TaskGroup::exists(id); }
 };
 const bthread_t TidTraits::ID_INIT = INVALID_BTHREAD;
 
@@ -427,7 +428,7 @@ int bthread_getattr(bthread_t tid, bthread_attr_t* attr) {
     return bthread::TaskGroup::get_attr(tid, attr);
 }
 
-int bthread_getconcurrency(void) {
+int bthread_getconcurrency() {
     return bthread::FLAGS_bthread_concurrency;
 }
 
@@ -448,9 +449,12 @@ int bthread_setconcurrency(int num) {
     }
     bthread::TaskControl* c = bthread::get_task_control();
     if (c != nullptr) {
-        if (num < c->concurrency()) {
+        // Compare against the usable concurrency: workers reserved for
+        // bthreads that never return to the scheduler are not configurable
+        // here.
+        if (num < c->usable_concurrency()) {
             return EPERM;
-        } else if (num == c->concurrency()) {
+        } else if (num == c->usable_concurrency()) {
             return 0;
         }
     }
@@ -465,11 +469,11 @@ int bthread_setconcurrency(int num) {
         }
         return 0;
     }
-    if (bthread::FLAGS_bthread_concurrency != c->concurrency()) {
+    if (bthread::FLAGS_bthread_concurrency != c->usable_concurrency()) {
         LOG(ERROR) << "CHECK failed: bthread_concurrency="
                    << bthread::FLAGS_bthread_concurrency
-                   << " != tc_concurrency=" << c->concurrency();
-        bthread::FLAGS_bthread_concurrency = c->concurrency();
+                   << " != tc_usable_concurrency=" << c->usable_concurrency();
+        bthread::FLAGS_bthread_concurrency = c->usable_concurrency();
     }
     if (num > bthread::FLAGS_bthread_concurrency) {
         // Create more workers if needed.
@@ -485,7 +489,7 @@ int bthread_getconcurrency_by_tag(bthread_tag_t tag) {
     if (c == nullptr) {
         return EPERM;
     }
-    return c->concurrency(tag);
+    return c->usable_concurrency(tag);
 }
 
 int bthread_setconcurrency_by_tag(int num, bthread_tag_t tag) {
@@ -500,19 +504,49 @@ int bthread_setconcurrency_by_tag(int num, bthread_tag_t tag) {
     }
     auto c = bthread::get_or_new_task_control();
     BAIDU_SCOPED_LOCK(bthread::g_task_control_mutex);
-    auto tag_ngroup = c->concurrency(tag);
+    // Reserved workers of this tag are excluded: `num` is the number of
+    // workers available to ordinary bthreads.
+    auto tag_ngroup = c->usable_concurrency(tag);
     auto add = num - tag_ngroup;
 
     if (add >= 0) {
-        auto added = c->add_workers(add, tag);
+        auto added = c->add_workers(add, tag, false);
         bthread::FLAGS_bthread_concurrency += added;
         return (add == added ? 0 : EPERM);
     } else {
         LOG(WARNING) << "Fail to set concurrency by tag: " << tag
-                     << ", tag concurrency should be larger than old oncurrency. old concurrency: "
-                     << tag_ngroup << ", new concurrency: " << num;
+                     << ", tag concurrency should be larger than "
+                        "old oncurrency. old concurrency: " << tag_ngroup
+                     << ", new concurrency: " << num;
         return EPERM;
     }
+}
+
+int bthread_reserve_concurrency_by_tag(int num, bthread_tag_t tag) {
+    if (num <= 0) {
+        LOG(ERROR) << "Invalid reserved concurrency=" << num;
+        return EINVAL;
+    }
+    if (tag < BTHREAD_TAG_DEFAULT || tag >= FLAGS_task_group_ntags) {
+        LOG(ERROR) << "Invalid tag=" << tag;
+        return EINVAL;
+    }
+    auto c = bthread::get_or_new_task_control();
+    if (c == nullptr) {
+        return ENOMEM;
+    }
+    BAIDU_SCOPED_LOCK(bthread::g_task_control_mutex);
+    if (c->concurrency(tag) + num > BTHREAD_MAX_CONCURRENCY) {
+        LOG(ERROR) << "Fail to reserve " << num << " workers of tag=" << tag
+                   << ", it already has " << c->concurrency(tag)
+                   << " of at most BTHREAD_MAX_CONCURRENCY="
+                   << BTHREAD_MAX_CONCURRENCY;
+        return EINVAL;
+    }
+    // Note that the reserved workers are created eagerly even under
+    // -bthread_min_concurrency: the bthreads they host never return to the
+    // scheduler, so they can't wait for the lazy growth in TaskControl::signal_task().
+    return c->reserve_workers(num, tag) == num ? 0 : EPERM;
 }
 
 int bthread_about_to_quit() {

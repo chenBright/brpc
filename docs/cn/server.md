@@ -585,6 +585,8 @@ server的验证是基于连接的。当server收到连接上的第一个请求�
 
 你不能认为Server就用了这么多线程，因为进程内的所有Server和Channel会共享线程资源，线程总数是所有ServerOptions.num_threads和-bthread_concurrency中的最大值。比如一个程序内有两个Server，num_threads分别为24和36，bthread_concurrency为16。那么worker线程数为max(24, 36, 16) = 36。这不同于其他RPC实现中往往是加起来。
 
+注意: event dispatcher（-event_dispatcher_num个，每个tag一组）和bthread内部的epoll线程跑的是不会退出的事件循环：空闲时等在epoll_wait/kevent上，有事件时就地处理。由于bthread不可抢占，这两种状态下承载它们的worker pthread都轮不到别的bthread，相当于被独占了。所以它们各自**额外**预留一个worker，不占用上述的最大值。也就是说进程内真实的worker pthread数是`max(所有num_threads, -bthread_concurrency) + 预留数`，而`num_threads`/`-bthread_concurrency`始终是**可用来跑普通bthread的**worker数。真实数量可以从bvar `bthread_worker_count`看到。
+
 Channel没有相应的选项，但可以通过选项-bthread_concurrency调整。
 
 另外，brpc**不区分IO线程和处理线程**。brpc知道如何编排IO和处理代码，以获得更高的并发度和线程利用率。

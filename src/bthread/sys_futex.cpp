@@ -29,10 +29,10 @@
 
 namespace bthread {
 
-class SimuFutex {
-public:
+struct SimuFutex {
     SimuFutex() : counts(0)
-                , ref(0) {
+                , ref(0)
+                , nsignal(0) {
         pthread_mutex_init(&lock, nullptr);
         pthread_cond_init(&cond, nullptr);
     }
@@ -41,10 +41,14 @@ public:
         pthread_cond_destroy(&cond);
     }
 
-public:
     pthread_mutex_t lock;
     pthread_cond_t cond;
+    // # of threads inside pthread_cond_wait().
     int32_t counts;
+    // # of threads already signalled but not
+    // woken up yet, they are counted in `counts`
+    // as well. Invariant: 0 <= nsignal <= counts.
+    int32_t nsignal;
     int32_t ref;
 };
 
@@ -84,6 +88,9 @@ int futex_wait_private(void* addr1, int expected, const timespec* timeout) {
                 }
             }
             --simu_futex.counts;
+            if (simu_futex.nsignal > 0) {
+                --simu_futex.nsignal;
+            }
         } else {
             errno = EAGAIN;
             rc = -1;
@@ -117,7 +124,16 @@ int futex_wake_private(void* addr1, int nwake) {
     int rc = 0;
     {
         std::unique_lock<pthread_mutex_t> mu1(simu_futex.lock);
-        nwake = (nwake < simu_futex.counts)? nwake: simu_futex.counts;
+        // A signaled thread decrements `counts` only after it is rescheduled,
+        // which may happen long after pthread_cond_signal() returned. Skip the
+        // threads that were signaled already, otherwise a burst of wakeups
+        // would signal the same thread over and over and return a number of
+        // woken threads larger than the real one. Callers rely on that number,
+        // e.g. TaskControl::signal_task() would believe an idle worker was
+        // notified and stop looking at the other parking lots, leaving the task
+        // in the queue with no worker aware of it.
+        const int nwaiter = simu_futex.counts - simu_futex.nsignal;
+        nwake = (nwake < nwaiter)? nwake: nwaiter;
         for (int i = 0; i < nwake; ++i) {
             if ((rc = pthread_cond_signal(&simu_futex.cond)) != 0) {
                 errno = rc;
@@ -126,6 +142,7 @@ int futex_wake_private(void* addr1, int nwake) {
                 ++nwakedup;
             }
         }
+        simu_futex.nsignal += nwakedup;
     }
 
     std::unique_lock<pthread_mutex_t> mu2(s_futex_map_mutex);
