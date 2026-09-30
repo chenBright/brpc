@@ -79,8 +79,12 @@ TEST(PrometheusMetrics, sanity) {
     std::string echo_count_name = butil::string_printf(
         "rpc_server_%d_test_echo_service_echo_count",
         server.listen_address().port);
-    for (int i = 0; i < 500 &&
-             bvar::Variable::describe_exposed(echo_count_name).empty(); ++i) {
+    // The exposing bthread can be delayed substantially when CI workers are
+    // under load. Use a deadline instead of a fixed number of polls so that
+    // the wait remains bounded while allowing slow schedulers to catch up.
+    const int64_t expose_deadline_us = butil::cpuwide_time_us() + 30000000L;
+    while (bvar::Variable::describe_exposed(echo_count_name).empty() &&
+           butil::cpuwide_time_us() < expose_deadline_us) {
         bthread_usleep(10000);
     }
     ASSERT_FALSE(bvar::Variable::describe_exposed(echo_count_name).empty());
