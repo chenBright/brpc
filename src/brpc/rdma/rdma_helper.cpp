@@ -20,14 +20,28 @@
 #include <dlfcn.h>                                // dlopen
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include <vector>
 #include <gflags/gflags.h>
+
+// Only needed to turn scatter-to-CQE off on the GDR device QP, and only on
+// mlx5. Detected rather than required: mlx5dv.h ships with rdma-core, but a
+// bare libibverbs install may not have it, and the symbols are dlopen'd
+// anyway so there is nothing to add to any build file.
+#if defined(__has_include)
+#if __has_include(<infiniband/mlx5dv.h>)
+#define BRPC_HAVE_MLX5DV 1
+#include <infiniband/mlx5dv.h>
+#endif
+#endif
+
 #include "butil/containers/flat_map.h"            // butil::FlatMap
 #include "butil/fd_guard.h"
 #include "butil/fd_utility.h"                     // butil::make_non_blocking
 #include "butil/logging.h"
 #include "brpc/socket.h"
 #include "brpc/rdma/block_pool.h"
+#include "brpc/rdma/device_memory.h"
 #include "brpc/rdma/rdma_endpoint.h"
 #include "brpc/rdma/rdma_helper.h"
 
@@ -74,6 +88,17 @@ void (*IbvAckAsyncEvent)(ibv_async_event*) = nullptr;
 const char* (*IbvEventTypeStr)(ibv_event_type) = nullptr;
 int (*IbvQueryEce)(ibv_qp*, ibv_ece*) = nullptr;
 int (*IbvSetEce)(ibv_qp*, ibv_ece*) = nullptr;
+
+#ifdef BRPC_HAVE_MLX5DV
+// libmlx5 is both the ibverbs provider and the home of the mlx5 direct-verbs
+// API, so it is already mapped by the time we look for these; the dlopen just
+// gets us a handle on it. Kept out of ReadRdmaDynamicLib() because a process
+// that never enables GDR has no reason to care whether they resolve.
+static void* g_handle_mlx5 = nullptr;
+static bool (*Mlx5dvIsSupported)(ibv_device*) = nullptr;
+static ibv_qp* (*Mlx5dvCreateQp)(ibv_context*, ibv_qp_init_attr_ex*,
+                                 mlx5dv_qp_init_attr*) = nullptr;
+#endif
 
 // NOTE:
 // ibv_post_send, ibv_post_recv, ibv_poll_cq, ibv_req_notify_cq are all inline function
@@ -472,13 +497,148 @@ static ibv_context* OpenDevice(int num_total, int* num_available_devices) {
     return ret_context;
 }
 
+// ---------------------------------------------------------------------------
+// GDR device QP creation.
+//
+// mlx5 lets the NIC place a small enough inbound payload directly in the CQE,
+// and then has the *userspace driver* memcpy it out into the receive WQE's
+// scatter list -- an ordinary host memcpy to whatever address that entry
+// holds. On the device QP that address is GPU memory, so ibv_poll_cq()
+// segfaults inside libmlx5. A whole small device attachment qualifies, and so
+// does the tail work request of a large one: 1MB+7 bytes against a 1MB
+// receive block goes out as 1MB + 7, and it is the 7-byte half that crashes.
+//
+// mlx5dv_create_qp() turns the feature off for one QP, which is what we want:
+// the host QP keeps it and keeps saving a DMA on small messages.
+// ---------------------------------------------------------------------------
+
+#ifdef BRPC_HAVE_MLX5DV
+// Set by InitDeviceQpCreationImpl(); read by CreateDeviceQp().
+static bool g_device_qp_use_mlx5dv = false;
+#endif
+
+static void InitDeviceQpCreationImpl() {
+    const char* const dev_name = g_context->device->name;
+#ifdef BRPC_HAVE_MLX5DV
+    const static char* const kMlx5Libs[] = {
+        "libmlx5.so.1",
+        "libmlx5.so"
+    };
+    for (const char* lib : kMlx5Libs) {
+        dlerror();  // Clear existing error
+        g_handle_mlx5 = dlopen(lib, RTLD_LAZY);
+        if (g_handle_mlx5) {
+            break;
+        }
+        LOG(WARNING) << "Failed to load " << lib << ": " << dlerror();
+    }
+    if (g_handle_mlx5) {
+        // mlx5dv_is_supported arrived in rdma-core v29 and mlx5dv_create_qp
+        // in v22; an older libmlx5 resolves neither and we fall through.
+        LoadSymbolOptional(g_handle_mlx5, Mlx5dvIsSupported, "mlx5dv_is_supported");
+        LoadSymbolOptional(g_handle_mlx5, Mlx5dvCreateQp, "mlx5dv_create_qp");
+    }
+    if (Mlx5dvIsSupported && Mlx5dvCreateQp &&
+        Mlx5dvIsSupported(g_context->device)) {
+        g_device_qp_use_mlx5dv = true;
+        LOG(INFO) << "GDR device QPs on " << dev_name << " will be created "
+                  << "with MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE";
+        return;
+    }
+#endif
+    if (strncmp(dev_name, "mlx5", 4) != 0) {
+        // Some other provider. Nothing known to scatter into the receive WQE,
+        // so nothing to turn off.
+        return;
+    }
+    // An mlx5 device we cannot reach through direct verbs. The env var is the
+    // vendor-documented workaround and the only one left, but it is
+    // process-wide: every QP created from here on loses scatter-to-CQE,
+    // including host QPs. Correctness first -- the alternative is a segfault
+    // in ibv_poll_cq the first time a small device attachment arrives.
+    // Overwrite rather than default: an explicit MLX5_SCATTER_TO_CQE=1 in the
+    // environment would otherwise be exactly that crash.
+    setenv("MLX5_SCATTER_TO_CQE", "0", 1);
+    LOG(WARNING) << "GDR is enabled on " << dev_name << " but mlx5dv is "
+                 << "unavailable, so scatter-to-CQE cannot be disabled per "
+                 << "QP; falling back to MLX5_SCATTER_TO_CQE=0 for the whole "
+                 << "process, which costs host QPs some small-message latency";
+}
+
+// Idempotent and thread-safe. Called once eagerly at initialization, while
+// the process is still single-threaded and before any QP exists, so that the
+// setenv() fallback above lands where it is safe; and again lazily from
+// CreateDeviceQp(), for a process that only turns GDR on afterwards.
+static void InitDeviceQpCreation() {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, InitDeviceQpCreationImpl);
+}
+
+ibv_qp* CreateDeviceQp(ibv_qp_init_attr* attr) {
+    // Same gate as the eager call in GlobalRdmaInitializeOrDieImpl(), and it
+    // has to be here too: this is the path taken by a process that turns GDR
+    // on after initialization, and a second channel landing in host memory
+    // has nothing for scatter-to-CQE to overrun. Leaving it ungated cost a
+    // misleading log line in the mlx5dv case and, without mlx5dv, a
+    // process-wide setenv() from a running server -- the very thing the eager
+    // call exists to avoid.
+    if (IsAttachmentMemoryDevice()) {
+        InitDeviceQpCreation();
+    }
+#ifdef BRPC_HAVE_MLX5DV
+    if (g_device_qp_use_mlx5dv) {
+        ibv_qp_init_attr_ex attr_ex;
+        memset(&attr_ex, 0, sizeof(attr_ex));
+        attr_ex.qp_context = attr->qp_context;
+        attr_ex.send_cq = attr->send_cq;
+        attr_ex.recv_cq = attr->recv_cq;
+        attr_ex.srq = attr->srq;
+        attr_ex.cap = attr->cap;
+        attr_ex.qp_type = attr->qp_type;
+        attr_ex.sq_sig_all = attr->sq_sig_all;
+        // The PD moves from being an argument to being part of the attr.
+        attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD;
+        attr_ex.pd = g_pd;
+
+        mlx5dv_qp_init_attr dv_attr;
+        memset(&dv_attr, 0, sizeof(dv_attr));
+        dv_attr.comp_mask = MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS;
+        dv_attr.create_flags = MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE;
+
+        ibv_qp* qp = Mlx5dvCreateQp(g_context, &attr_ex, &dv_attr);
+        if (qp == nullptr) {
+            // Deliberately no retry through ibv_create_qp(): that QP would
+            // come back with scatter-to-CQE on and crash later instead of
+            // here. The caller drops back to a host-only connection.
+            PLOG(WARNING) << "Fail to create device QP via mlx5dv_create_qp";
+        }
+        return qp;
+    }
+#endif
+    return IbvCreateQp(g_pd, attr);
+}
+
 static void GlobalRdmaInitializeOrDieImpl() {
     if (BAIDU_UNLIKELY(g_skip_rdma_init)) {
         // Just for UT
         return;
     }
 
-    if (ReadRdmaDynamicLib() < 0) { 
+    // Asking for the second channel and not getting it is a configuration
+    // error, not something to limp along with: the alternative is every RPC
+    // carrying an attachment failing with EDEVICECHANNEL at run time, which
+    // is the same outage found much later. A node in a mixed fleet that has
+    // no GPU is not the awkward case it used to be -- it sets
+    // --rdma_attachment_memory=host, which never touches CUDA.
+    //
+    // Done first only so that a bad --rdma_gdr_device_id is reported before
+    // the rest of the RDMA startup logging buries it.
+    if (GlobalGdrInitialize() < 0) {
+        PLOG(ERROR) << "Fail to initialize the second RDMA channel";
+        ExitWithError();
+    }
+
+    if (ReadRdmaDynamicLib() < 0) {
         LOG(ERROR) << "Fail to load rdma dynamic lib";
         ExitWithError();
     }
@@ -556,6 +716,17 @@ static void GlobalRdmaInitializeOrDieImpl() {
     if (!InitBlockPool(RdmaRegisterMemory)) {
         PLOG(ERROR) << "Fail to initialize RDMA memory pool";
         ExitWithError();
+    }
+
+    // IsAttachmentMemoryDevice(), not IsGdrAvailable(): scatter-to-CQE writes
+    // small inbound payloads into the CQE, and it is specifically doing that
+    // to a GPU-memory QP that exhausts device memory. A second channel that
+    // lands in host memory has the same QP and none of the hazard.
+    if (IsAttachmentMemoryDevice()) {
+        // Ahead of the prepared QP pool below, and while the process is
+        // still single-threaded: if this has to fall back to setenv(), that
+        // is the only point where the call is unambiguously safe.
+        InitDeviceQpCreation();
     }
 
     if (RdmaEndpoint::GlobalInitialize() < 0) {

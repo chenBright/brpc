@@ -36,6 +36,7 @@
 #include "brpc/serialized_response.h"
 #include "brpc/details/usercode_backup_pool.h"       // TooManyUserCode
 #include "brpc/rdma/rdma_helper.h"
+#include "brpc/rdma/device_memory.h"
 #include "brpc/policy/esp_authenticator.h"
 #include "brpc/transport_factory.h"
 #include "brpc/details/controller_private_accessor.h"
@@ -83,6 +84,7 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
         opt.client_host.empty() &&
         opt.device_name.empty() &&
         opt.connection_group.empty() &&
+        opt.socket_mode == SOCKET_MODE_TCP &&
         opt.hc_option.health_check_path.empty()) {
         // Returning zeroized result by default is more intuitive for users.
         return ChannelSignature();
@@ -139,8 +141,16 @@ static ChannelSignature ComputeChannelSignature(const ChannelOptions& opt) {
         }
         if (opt.socket_mode == SOCKET_MODE_RDMA) {
             buf.append("|rdma");
+        } else if (opt.socket_mode == SOCKET_MODE_RDMA_AND_DEVICE) {
+            // Keeps these connections out of the SocketMap entry a channel
+            // that did not ask for a device channel would use. Sharing one
+            // would make the winner of the connect race decide whether
+            // everybody's attachments work.
+            buf.append("|rdma+dev");
         } else if (opt.socket_mode == SOCKET_MODE_URMA) {
             buf.append("|urma");
+        } else if (opt.socket_mode == SOCKET_MODE_UBRING) {
+            buf.append("|ubring");
         }
         butil::MurmurHash3_x64_128_Update(&mm_ctx, buf.data(), buf.size());
         buf.clear();
@@ -231,6 +241,27 @@ int Channel::InitChannelOptions(const ChannelOptions* options) {
             return -1;
         }
     }
+
+#if BRPC_WITH_RDMA
+    if (_options.socket_mode == SOCKET_MODE_RDMA_AND_DEVICE &&
+        _options.connection_type != CONNECTION_TYPE_SINGLE) {
+        // A message whose device half has not arrived yet is parked on the
+        // socket's parsing context. Socket::ReturnToPool() and GetPooledSocket()
+        // both CHECK that context is nullptr, so handing such a connection back to
+        // a SocketPool aborts the process. Rejecting the combination here beats
+        // discovering it as a crash under load.
+        // See docs/cn/gdr_design.md section 8.4.
+        //
+        // Keyed on the socket mode rather than on rdma::IsGdrAvailable(): the
+        // hazard is a property of the second channel, which a host-memory
+        // deployment has just the same, and of this channel in particular
+        // rather than of the process.
+        LOG(ERROR) << "connection_type=" << _options.connection_type.name()
+                   << " cannot be used with socket_mode="
+                      "SOCKET_MODE_RDMA_AND_DEVICE, use connection_type=single";
+        return -1;
+    }
+#endif
 
     _preferred_index = get_client_side_messenger()->FindProtocolIndex(_options.protocol);
     if (_preferred_index < 0) {

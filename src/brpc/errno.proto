@@ -55,4 +55,5 @@ enum Errno {
     // Errno related to RDMA (may happen at both sides)
     ERDMA                   = 3001;  // RDMA verbs error
     ERDMAMEM                = 3002;  // Memory not registered for RDMA    
+    EDEVICECHANNEL          = 3003;  // No GPU device channel on the connection
 }

@@ -87,6 +87,12 @@ BAIDU_REGISTER_ERRNO(brpc::ESHUTDOWNWRITE, "Shutdown write of socket");
 BAIDU_REGISTER_ERRNO(brpc::ERDMA, "RDMA verbs error");
 BAIDU_REGISTER_ERRNO(brpc::ERDMAMEM, "Memory not registered for RDMA");
 #endif
+// Outside the BRPC_WITH_RDMA guard above on purpose: a device attachment on a
+// connection with no second channel no longer fails, it falls back to the
+// host stream, so what is left of this error -- combining one with a stream
+// -- can be raised in a build with no RDMA at all.
+BAIDU_REGISTER_ERRNO(brpc::EDEVICECHANNEL,
+                     "The connection has no GPU device channel");
 
 DECLARE_bool(log_as_json);
 
@@ -438,6 +444,8 @@ void Controller::ResetNonPods() {
     delete _response_user_fields;
     _request_attachment.clear();
     _response_attachment.clear();
+    _request_device_attachment.clear();
+    _response_device_attachment.clear();
     if (_wpa) {
         _wpa->MarkRPCAsDone(Failed());
         _wpa.reset(nullptr);
@@ -1889,6 +1897,11 @@ void Controller::set_mongo_session_data(MongoContext* data) {
 bool Controller::is_ssl() const {
     Socket* s = _current_call.sending_sock.get();
     return s != nullptr && s->is_ssl();
+}
+
+bool Controller::has_device_channel() const {
+    Socket* s = _current_call.sending_sock.get();
+    return s != nullptr && s->device_stream() != nullptr;
 }
 
 x509_st* Controller::get_peer_certificate() const {

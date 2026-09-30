@@ -29,7 +29,7 @@ int TransportFactory::ContextInitOrDie(
         return 0;
     }
 #if BRPC_WITH_RDMA
-    if (mode == SOCKET_MODE_RDMA) {
+    if (IsRdmaSocketMode(mode)) {
         return RdmaTransport::ContextInitOrDie(server_or_not, options);
     }
 #endif
@@ -52,7 +52,7 @@ std::unique_ptr<Transport> TransportFactory::CreateTransport(SocketMode mode) {
         return std::unique_ptr<TcpTransport>(new TcpTransport());
     }
 #if BRPC_WITH_RDMA
-    if (mode == SOCKET_MODE_RDMA) {
+    if (IsRdmaSocketMode(mode)) {
         return std::unique_ptr<RdmaTransport>(new RdmaTransport());
     }
 #endif

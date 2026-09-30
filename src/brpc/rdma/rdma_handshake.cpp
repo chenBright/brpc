@@ -158,12 +158,12 @@ int RdmaHandshakeClientV2::SendLocalHello() {
     local_msg.hello_ver = HELLO_V2_VERSION;
     local_msg.impl_ver = IMPL_V2_VERSION;
     local_msg.block_size = g_rdma_recv_block_size;
-    local_msg.sq_size = ep->_sq_size;
-    local_msg.rq_size = ep->_rq_size;
+    local_msg.sq_size = ep->_host.sq_size;
+    local_msg.rq_size = ep->_host.rq_size;
     local_msg.lid = GetRdmaLid();
     local_msg.gid = GetRdmaGid();
-    if (BAIDU_LIKELY(ep->_resource)) {
-        local_msg.qp_num = ep->_resource->qp->qp_num;
+    if (BAIDU_LIKELY(ep->_host.resource)) {
+        local_msg.qp_num = ep->_host.resource->qp->qp_num;
     } else {
         // Only happens in UT
         local_msg.qp_num = 0;
@@ -246,12 +246,12 @@ int RdmaHandshakeServerV2::SendLocalHello() {
         local_msg.hello_ver = HELLO_V2_VERSION;
         local_msg.impl_ver = IMPL_V2_VERSION;
         local_msg.block_size = g_rdma_recv_block_size;
-        local_msg.sq_size = _ep->_sq_size;
-        local_msg.rq_size = _ep->_rq_size;
+        local_msg.sq_size = _ep->_host.sq_size;
+        local_msg.rq_size = _ep->_host.rq_size;
         local_msg.lid = GetRdmaLid();
         local_msg.gid = GetRdmaGid();
-        if (BAIDU_LIKELY(_ep->_resource)) {
-            local_msg.qp_num = _ep->_resource->qp->qp_num;
+        if (BAIDU_LIKELY(_ep->_host.resource)) {
+            local_msg.qp_num = _ep->_host.resource->qp->qp_num;
         } else {
             // Only happens in UT
             local_msg.qp_num = 0;
@@ -286,18 +286,36 @@ bool ValidRdmaHello(const RdmaHello& msg) {
     if (msg.qp_num() == 0 && !g_skip_rdma_init) {
         return false;
     }
+    // The device channel is optional, but an advertised one must be usable:
+    // silently dropping a malformed device sub-message would leave the peer
+    // posting device WRs against a QP we never brought up.
+    if (msg.has_device()) {
+        const RdmaDeviceChannel& dev = msg.device();
+        if (dev.sq_size() > MAX_UINT16 || dev.rq_size() > MAX_UINT16) {
+            return false;
+        }
+        if (dev.sq_size() < MIN_QP_SIZE || dev.rq_size() < MIN_QP_SIZE) {
+            return false;
+        }
+        if (dev.block_size() < MIN_BLOCK_SIZE) {
+            return false;
+        }
+        if (dev.qp_num() == 0 && !g_skip_rdma_init) {
+            return false;
+        }
+    }
     return true;
 }
 
 void FillLocalRdmaHello(const RdmaEndpoint* ep, RdmaHello* msg) {
     msg->set_block_size(g_rdma_recv_block_size);
-    msg->set_sq_size(ep->_sq_size);
-    msg->set_rq_size(ep->_rq_size);
+    msg->set_sq_size(ep->_host.sq_size);
+    msg->set_rq_size(ep->_host.rq_size);
     msg->set_lid(GetRdmaLid());
     ibv_gid gid = GetRdmaGid();
     msg->set_gid(reinterpret_cast<const char*>(gid.raw), sizeof(gid.raw));
-    if (BAIDU_LIKELY(ep->_resource)) {
-        msg->set_qp_num(ep->_resource->qp->qp_num);
+    if (BAIDU_LIKELY(ep->_host.resource)) {
+        msg->set_qp_num(ep->_host.resource->qp->qp_num);
     } else {
         // Only happens in UT
         msg->set_qp_num(0);
@@ -317,6 +335,26 @@ void FillLocalRdmaHello(const RdmaEndpoint* ep, RdmaHello* msg) {
         ece->set_vendor_id(ep->_outgoing_ece->vendor_id);
         ece->set_options(ep->_outgoing_ece->options);
         ece->set_comp_mask(ep->_outgoing_ece->comp_mask);
+    }
+
+    // Advertise the device channel iff this connection has one. The two
+    // roles reach this point at different times, and that is deliberate:
+    //   Client: it has only allocated the QP so far, so this is a proposal.
+    //           If the server's reply carries no device field,
+    //           ApplyRemoteHello() hands the QP back.
+    //   Server: it has already brought the device QP up by now, so this is
+    //           a confirmation and the client can rely on it.
+    if (ep->_device.has_value()) {
+        RdmaDeviceChannel* dev = msg->mutable_device();
+        if (BAIDU_LIKELY(ep->_device->resource != nullptr)) {
+            dev->set_qp_num(ep->_device->resource->qp->qp_num);
+        } else {
+            // Only happens in UT
+            dev->set_qp_num(0);
+        }
+        dev->set_block_size(ep->_device->recv_block_size);
+        dev->set_sq_size(ep->_device->sq_size);
+        dev->set_rq_size(ep->_device->rq_size);
     }
 }
 
@@ -380,6 +418,14 @@ void TranslateHello(const RdmaHello& msg, ParsedHello* out) {
         ece.comp_mask = msg.ece().comp_mask();
         out->ece = ece;
     }
+    if (msg.has_device()) {
+        DeviceChannelParams device;
+        device.qp_num     = msg.device().qp_num();
+        device.block_size = msg.device().block_size();
+        device.sq_size    = static_cast<uint16_t>(msg.device().sq_size());
+        device.rq_size    = static_cast<uint16_t>(msg.device().rq_size());
+        out->device = device;
+    }
 }
 
 }  // namespace v3_wire
@@ -389,9 +435,9 @@ int RdmaHandshakeClientV3::SendLocalHello() {
     // hello. v3-only. Best-effort: any failure or missing API just means we
     // won't advertise ECE (the peer then degrades to no-ECE establishment).
     if (FLAGS_rdma_ece && IbvQueryEce != nullptr &&
-        _ep->_resource && _ep->_resource->qp) {
+        _ep->_host.resource && _ep->_host.resource->qp) {
         ibv_ece ece;
-        if (IbvQueryEce(_ep->_resource->qp, &ece) == 0) {
+        if (IbvQueryEce(_ep->_host.resource->qp, &ece) == 0) {
             _ep->_outgoing_ece = ece;
         } else {
             LOG_IF(WARNING, FLAGS_rdma_trace_verbose)

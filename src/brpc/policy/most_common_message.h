@@ -21,6 +21,7 @@
 
 #include "butil/object_pool.h"
 #include "brpc/input_messenger.h"
+#include "brpc/device_attachment.h"
 
 
 namespace brpc {
@@ -33,6 +34,10 @@ namespace policy {
 struct BAIDU_CACHELINE_ALIGNMENT MostCommonMessage : public InputMessageBase {
     butil::IOBuf meta;
     butil::IOBuf payload;
+    // GPU device memory cut out of the connection's device stream. Empty for
+    // everything but a baidu_std message over a GDR connection. Costs an
+    // empty vector otherwise.
+    DeviceAttachment device_payload;
     PipelinedInfo pi;
 
     inline static MostCommonMessage* Get() {
@@ -43,6 +48,7 @@ struct BAIDU_CACHELINE_ALIGNMENT MostCommonMessage : public InputMessageBase {
     void DestroyImpl() {
         meta.clear();
         payload.clear();
+        device_payload.clear();
         pi.reset();
         butil::return_object(this);
     }

@@ -55,6 +55,34 @@ message RdmaHello {
     //   Server hello: carries the REDUCED/negotiated ECE
     //                   queried after the QP reached RTS.
     optional RdmaEce ece = 7;
+
+    // GPU Direct RDMA device channel.
+    // Present only when this side was built with GDR, has it enabled, and
+    // managed to allocate a second QP for device memory. Absent means "I
+    // cannot carry device attachments". The channel is established only
+    // when BOTH sides send this field, so a v3 peer without GDR degrades
+    // silently to a host-only connection, and a v2 peer is never asked.
+    //
+    // Device data always travels on its own QP; it is never mixed into the
+    // host byte stream, because the host stream ends up in an IOBuf and a
+    // device pointer inside an IOBuf is a crash rather than merely a
+    // hazard. See docs/cn/gdr_design.md section 2.
+    optional RdmaDeviceChannel device = 8;
+}
+
+// The second QP of a connection, carrying GPU device memory only.
+message RdmaDeviceChannel {
+    // QP number of the sender's device QP.
+    required uint32 qp_num = 1;
+    // Size of each block the sender posted to its device RQ. The peer must
+    // not put more than this many bytes in one device WR.
+    //
+    // This is the sender's DEVICE block size and has nothing to do with
+    // RdmaHello.block_size, which describes the host RQ. Conflating the two
+    // is how PR #3144 ended up posting 64x too much.
+    required uint32 block_size = 2;
+    required uint32 sq_size = 3;
+    required uint32 rq_size = 4;
 }
 
 // Mirrors struct ibv_ece { uint32 vendor_id; uint32 options; uint32 comp_mask; }.

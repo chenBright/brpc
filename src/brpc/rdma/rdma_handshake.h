@@ -22,6 +22,7 @@
 
 #include <memory>
 #include <infiniband/verbs.h>
+#include <gflags/gflags_declare.h>              // DECLARE_int32
 #include "butil/macros.h"
 #include "butil/containers/optional.h"
 #include "brpc/rdma/rdma_handshake_constants.h"
@@ -33,7 +34,20 @@ class IOBuf;
 namespace brpc {
 namespace rdma {
 
+DECLARE_int32(rdma_client_handshake_version);
+
 class RdmaEndpoint;
+
+// GPU Direct RDMA device channel advertised by a peer (v3 handshake only).
+// Mirrors RdmaDeviceChannel in rdma_handshake.proto.
+struct DeviceChannelParams {
+    uint32_t qp_num;
+    // The peer's DEVICE receive block size. Unrelated to ParsedHello's
+    // block_size, which describes its host RQ.
+    uint32_t block_size;
+    uint16_t sq_size;
+    uint16_t rq_size;
+};
 
 // Wire-format-agnostic representation of a peer's hello message.
 // Each protocol version (v2 binary, v3 protobuf) translates its own
@@ -53,6 +67,10 @@ struct ParsedHello {
     //   - on the server side: the client's queried ECE capabilities;
     //   - on the client side: the server's reduced/negotiated ECE.
     butil::optional<ibv_ece> ece;
+    // GDR device channel, v3 handshake only. nullopt means the peer cannot
+    // carry device attachments, so the connection stays host-only. A v2 peer
+    // is always nullopt.
+    butil::optional<DeviceChannelParams> device;
 };
 
 // Result of reading/parsing a peer's hello (see ReceiveAndParseRemoteHello).

@@ -22,6 +22,8 @@
 #include "brpc/tcp_transport.h"
 #include "brpc/input_messenger.h"
 #include "brpc/rdma/rdma_endpoint.h"
+#include "brpc/rdma/rdma_handshake.h"
+#include "brpc/rdma/device_memory.h"
 #include "brpc/rdma/rdma_helper.h"
 
 namespace brpc {
@@ -32,7 +34,10 @@ extern SocketVarsCollector *g_vars;
 
 void RdmaTransport::Init(Socket *socket, const SocketOptions &options) {
     CHECK(_rdma_ep == nullptr);
-    if (options.socket_mode == SOCKET_MODE_RDMA) {
+    if (IsRdmaSocketMode(options.socket_mode)) {
+        // The endpoint reads socket_mode() for itself, including whether this
+        // connection runs a device channel. Socket::Create() has already
+        // stored it, which is what makes that readable this early.
         _rdma_ep = new rdma::RdmaEndpoint(socket);
         _rdma_state = RDMA_UNKNOWN;
     } else {
@@ -184,27 +189,112 @@ void RdmaTransport::Debug(std::ostream &os) {
     }
 }
 
+DeviceStream* RdmaTransport::GetDeviceStream() {
+    if (_rdma_state != RDMA_ON || _rdma_ep == nullptr ||
+        !_rdma_ep->has_device_channel()) {
+        return nullptr;
+    }
+    return _rdma_ep->device_stream();
+}
+
+DeviceChannelState RdmaTransport::GetDeviceChannelState() {
+    if (_rdma_state == RDMA_UNKNOWN) {
+        // Handshake still in flight. Whether it ends in a device channel
+        // depends on what the peer answers, which has not happened yet.
+        return DEVICE_CHANNEL_UNDECIDED;
+    }
+    return GetDeviceStream() ? DEVICE_CHANNEL_ON : DEVICE_CHANNEL_OFF;
+}
+
+bool RdmaTransport::HasPendingWrite() const {
+    // Deliberately not gated on _rdma_state: only CutFromIOBufList() can
+    // empty this queue, so if the state somehow moved away from RDMA_ON with
+    // bytes still in it, hiding them here would strand them.
+    return _rdma_ep != nullptr && _rdma_ep->HasQueuedDeviceData();
+}
+
+void RdmaTransport::DiscardPendingWrite() {
+    if (_rdma_ep != nullptr) {
+        _rdma_ep->DiscardQueuedDeviceData();
+    }
+}
+
 int RdmaTransport::ContextInitOrDie(bool serverOrNot, const void* _options) {
+    SocketMode socket_mode = SOCKET_MODE_TCP;
     if (serverOrNot) {
-        if (!OptionsAvailableOverRdma(static_cast<const ServerOptions *>(_options))) {
+        const ServerOptions* opt = static_cast<const ServerOptions*>(_options);
+        socket_mode = opt->socket_mode;
+        if (!OptionsAvailableOverRdma(opt)) {
             return -1;
         }
         rdma::GlobalRdmaInitializeOrDie();
-        if (!rdma::InitPollingModeWithTag(static_cast<const ServerOptions *>(_options)->bthread_tag)) {
+        if (!rdma::InitPollingModeWithTag(opt->bthread_tag)) {
             return -1;
         }
     } else {
-        if (!OptionsAvailableForRdma(static_cast<const ChannelOptions *>(_options))) {
+        const ChannelOptions* opt =
+            static_cast<const ChannelOptions*>(_options);
+        socket_mode = opt->socket_mode;
+        if (!OptionsAvailableForRdma(opt)) {
             return -1;
         }
         rdma::GlobalRdmaInitializeOrDie();
         if (!rdma::InitPollingModeWithTag(bthread_self_tag())) {
             return -1;
         }
-        return 0;
     }
 
+    // Belt and braces for the checks above: they test the configuration, this
+    // tests the result. GlobalRdmaInitializeOrDie() exits the process on most
+    // GDR startup failures, but not on all of them -- a build without
+    // BRPC_WITH_GDR, for instance, simply has no pool to offer. Either way the
+    // operator hears about it here, at startup, instead of from a connection
+    // that will not establish.
+    if (socket_mode == SOCKET_MODE_RDMA_AND_DEVICE && !rdma::IsGdrAvailable()) {
+        LOG(ERROR) << "SOCKET_MODE_RDMA_AND_DEVICE needs the second channel's "
+                      "memory pool, which failed to initialize";
+        return -1;
+    }
     return 0;
+}
+
+// Reject a device-channel configuration that cannot possibly come up.
+//
+// Each of these used to be a silent downgrade: the endpoint gave up on the
+// device channel during the handshake, the end-of-handshake demand check then
+// failed the connection with EDEVICECHANNEL, and the operator was left with
+// connections that refuse to establish and no hint as to why. A configuration
+// mistake belongs in the startup log, once. Shared by both directions because
+// every one of them is a property of this process, not of the peer.
+//
+// `is_client` gates only the handshake version, which is the one thing a
+// server does not choose.
+static bool DeviceChannelOptionsAvailable(SocketMode socket_mode,
+                                          bool is_client) {
+    if (socket_mode != SOCKET_MODE_RDMA_AND_DEVICE) {
+        return true;
+    }
+    if (!rdma::FLAGS_rdma_enable_gdr) {
+        LOG(ERROR) << "SOCKET_MODE_RDMA_AND_DEVICE needs the second channel's "
+                      "memory pool: set -rdma_enable_gdr";
+        return false;
+    }
+    if (rdma::FLAGS_rdma_use_polling) {
+        LOG(ERROR) << "SOCKET_MODE_RDMA_AND_DEVICE does not support "
+                      "-rdma_use_polling: the device CQs share the host "
+                      "connection's comp_channel, which polling mode does not "
+                      "use. Unset one of the two";
+        return false;
+    }
+    if (is_client && rdma::FLAGS_rdma_client_handshake_version < 3) {
+        // The device qp_num has nowhere to ride in a v2 hello, so a v2 client
+        // can never advertise a device channel.
+        LOG(ERROR) << "SOCKET_MODE_RDMA_AND_DEVICE needs the v3 handshake: set "
+                      "-rdma_client_handshake_version=3 (now "
+                   << rdma::FLAGS_rdma_client_handshake_version << ")";
+        return false;
+    }
+    return true;
 }
 
 bool RdmaTransport::OptionsAvailableForRdma(const ChannelOptions* opt) {
@@ -215,6 +305,9 @@ bool RdmaTransport::OptionsAvailableForRdma(const ChannelOptions* opt) {
     if (!rdma::SupportedByRdma(opt->protocol.name())) {
         LOG(WARNING) << "Cannot use " << opt->protocol.name()
                      << " over RDMA";
+        return false;
+    }
+    if (!DeviceChannelOptionsAvailable(opt->socket_mode, true)) {
         return false;
     }
     return true;
@@ -235,6 +328,9 @@ bool RdmaTransport::OptionsAvailableOverRdma(const ServerOptions* opt) {
     }
     if (opt->mongo_service_adaptor) {
         LOG(WARNING) << "MONGO is not supported by RDMA";
+        return false;
+    }
+    if (!DeviceChannelOptionsAvailable(opt->socket_mode, false)) {
         return false;
     }
     return true;

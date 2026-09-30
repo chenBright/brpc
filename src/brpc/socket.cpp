@@ -559,6 +559,11 @@ void Socket::ReleaseAllFailedWriteRequests(Socket::WriteRequest* req) {
         error_code = ESHUTDOWNWRITE;
         error_text = "Shutdown write of the socket";
     }
+    // Whatever the transport still holds can never go out now, and it may be
+    // pinning device memory. Drop it, and tell IsWriteComplete() below to
+    // stop asking about it: the loop converges by emptying `req->data', and
+    // a transport that answered "not complete" would spin it forever.
+    _transport->DiscardPendingWrite();
     // Notice that `req' is not tail if Address after IsWriteComplete fails.
     do {
         req = ReleaseWriteRequestsExceptLast(req, error_code, error_text);
@@ -566,7 +571,7 @@ void Socket::ReleaseAllFailedWriteRequests(Socket::WriteRequest* req) {
             CancelUnwrittenBytes(req->data.size());
         }
         req->data.clear();  // MUST, otherwise IsWriteComplete is false
-    } while (!IsWriteComplete(req, true, nullptr));
+    } while (!IsWriteComplete(req, true, nullptr, false));
     ReturnFailedWriteRequest(req, error_code, error_text);
 }
 
@@ -1200,13 +1205,19 @@ int Socket::Status(SocketId id, int32_t* nref) {
 // `singular_node' is true iff `old_head' is the only node in its list.
 bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
                              bool singular_node,
-                             Socket::WriteRequest** new_tail) {
+                             Socket::WriteRequest** new_tail,
+                             bool check_transport) {
     CHECK(nullptr == old_head->next);
     // Try to set _write_head to nullptr to mark that the write is done.
     WriteRequest* new_head = old_head;
     WriteRequest* desired = nullptr;
     bool return_when_no_more = true;
-    if (!old_head->data.empty() || !singular_node) {
+    // A transport may still be holding bytes of its own -- the RDMA device
+    // channel queues a DeviceAttachment when its credits are shut. Only the
+    // writer can post those, so the write is not complete until they are
+    // gone, otherwise KeepWrite would exit and leave them there forever.
+    if (!old_head->data.empty() || !singular_node ||
+        (check_transport && _transport->HasPendingWrite())) {
         desired = old_head;
         // Write is obviously not complete if old_head is not fully written.
         return_when_no_more = false;
@@ -3038,6 +3049,17 @@ void Socket::OnProgressiveReadCompleted() {
             SetFailed(EUNUSED, "[%s]Close short connection", __FUNCTION__);
         }
     }
+}
+
+DeviceStream* Socket::device_stream() const {
+    // _transport is set by Socket::Init() and lives as long as the Socket,
+    // but Debug()-style callers can reach a half-reset Socket, so check.
+    return _transport ? _transport->GetDeviceStream() : nullptr;
+}
+
+DeviceChannelState Socket::device_channel_state() const {
+    return _transport ? _transport->GetDeviceChannelState()
+                      : DEVICE_CHANNEL_OFF;
 }
 
 SocketSSLContext::SocketSSLContext()

@@ -56,6 +56,14 @@ ibv_context* GetRdmaContext();
 // Get global RDMA protection domain
 ibv_pd* GetRdmaPd();
 
+// Create a QP for the GDR device channel on the global PD. Same as
+// ibv_create_qp(GetRdmaPd(), attr), except that on mlx5 the QP also gets
+// scatter-to-CQE disabled -- without which ibv_poll_cq() memcpys a small
+// inbound payload straight into device memory from the CPU and segfaults.
+// Returns nullptr on failure; the caller is expected to fall back to a
+// host-only connection rather than to ibv_create_qp().
+ibv_qp* CreateDeviceQp(ibv_qp_init_attr* attr);
+
 // Return lkey of the given address
 uint32_t GetLKey(void* buf);
 

@@ -51,6 +51,33 @@ public:
     virtual void QueueMessage(InputMessageClosure& input_msg, int* num_bthread_created, bool last_msg) = 0;
     virtual void Debug(std::ostream &os) = 0;
 
+    // The device (GPU memory) side channel of this connection, or nullptr when
+    // the transport has none. Only RdmaTransport can ever return non-nullptr,
+    // and only after a successful device-channel negotiation.
+    virtual DeviceStream* GetDeviceStream() { return nullptr; }
+
+    // Whether GetDeviceStream() can still start returning non-nullptr. A
+    // transport that never negotiates anything is OFF from the start; only
+    // RdmaTransport spends time UNDECIDED, between Init() and the end of its
+    // handshake.
+    virtual DeviceChannelState GetDeviceChannelState() {
+        return DEVICE_CHANNEL_OFF;
+    }
+
+    // Whether the transport is still holding bytes that only the socket's
+    // writer can push out. TCP holds nothing -- whatever CutFromIOBufList()
+    // accepted is already in the kernel. RdmaTransport's device channel does:
+    // a DeviceAttachment queued while the device credits were shut waits
+    // there. Socket::IsWriteComplete() consults this so that KeepWrite stays
+    // alive to post the rest; declaring the write finished would leave the
+    // queue with nobody to drain it.
+    virtual bool HasPendingWrite() const { return false; }
+
+    // Drop what HasPendingWrite() reports. Called once the socket has given
+    // up on the write, where the bytes can never go out anyway and holding
+    // them would pin device memory until the socket is recycled.
+    virtual void DiscardPendingWrite() {}
+
     bool HasOnEdgeTrigger() {
         return _on_edge_trigger != nullptr;
     }

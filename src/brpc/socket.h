@@ -44,6 +44,7 @@
 #include "brpc/health_check_option.h"
 #include "brpc/socket_mode.h"
 #include "brpc/input_messenger_processor.h"  // InputMessengerProcessor
+#include "brpc/device_attachment.h"       // DeviceStream, DeviceChannelState
 
 namespace brpc {
 namespace policy {
@@ -54,6 +55,7 @@ class H2GlobalStreamCreator;
 namespace schan {
 class ChannelBalancer;
 }
+
 namespace rdma {
 class RdmaEndpoint;
 class RdmaConnect;
@@ -697,6 +699,19 @@ public:
     // reading is finally done.
     void OnProgressiveReadCompleted();
 
+    // The GPU device side channel of this connection, or nullptr when the
+    // transport cannot carry device attachments (i.e. anything other than an
+    // RDMA connection whose handshake negotiated a device QP).
+    //
+    // Protocol code cuts device bytes through this handle so that it needs no
+    // RDMA header. See brpc/device_attachment.h and docs/cn/gdr_design.md.
+    DeviceStream* device_stream() const;
+
+    // Same question as device_stream() != nullptr, but able to say "not yet
+    // decided" while the connection is still handshaking. Callers that run
+    // before the socket is established (request packing) must use this.
+    DeviceChannelState device_channel_state() const;
+
     // Last cpuwide-time at when this socket was read or write.
     int64_t last_active_time_us() const {
         return std::max(
@@ -806,8 +821,11 @@ private:
 
     static void* KeepWrite(void*);
 
+    // `check_transport' is false only in ReleaseAllFailedWriteRequests(),
+    // which converges by emptying old_head->data and would never converge if
+    // a transport-side backlog could keep saying "not complete".
     bool IsWriteComplete(WriteRequest* old_head, bool singular_node,
-                         WriteRequest** new_tail);
+                         WriteRequest** new_tail, bool check_transport = true);
 
     void ReturnFailedWriteRequest(
         WriteRequest*, int error_code, const std::string& error_text);
