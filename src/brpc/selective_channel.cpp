@@ -46,14 +46,14 @@ public:
     ChannelOwnership ownership;
 
     // internal channel is deleted after the fake Socket is SetFailed
-    void BeforeRecycle(Socket*) {
+    void BeforeRecycle(Socket*) override {
         if (ownership == OWNS_CHANNEL) {
             delete chan;
         }
         delete this;
     }
 
-    int CheckHealth(Socket* ptr) {
+    int CheckHealth(Socket* ptr) override {
         if (ptr->health_check_count() == 0) {
             LOG(INFO) << "Checking " << *chan << " chan=0x" << (void*)chan
                       << " Fake" << *ptr;
@@ -61,7 +61,7 @@ public:
         return chan->CheckHealth();
     }
 
-    void AfterRevived(Socket* ptr) {
+    void AfterRevived(Socket* ptr) override {
         LOG(INFO) << "Revived " << *chan << " chan=0x" << (void*)chan
                   << " Fake" << *ptr << " (Connectable)";
     }
@@ -94,7 +94,7 @@ public:
     void RemoveAndDestroyChannel(const SelectiveChannel::ChannelHandle& handle);
     int SelectChannel(const LoadBalancer::SelectIn& in, SelectOut* out);
     int CheckHealth();
-    void Describe(std::ostream& os, const DescribeOptions&);
+    void Describe(std::ostream& os, const DescribeOptions&) override;
 
 private:
     butil::Mutex _mutex;
@@ -121,7 +121,7 @@ public:
         , _peer_id(INVALID_SOCKET_ID) {
     }
     ~SubDone() {}
-    void Run();
+    void Run() override;
 
     Sender* _owner;
     CallId _cid;
@@ -140,14 +140,14 @@ public:
            const butil::intrusive_ptr<SharedLoadBalancer>& lb,
            google::protobuf::Closure* user_done);
     ~Sender() { Clear(); }
-    int IssueRPC(int64_t start_realtime_us);
+    int IssueRPC(int64_t start_realtime_us) override;
     Resource PopFree();
     // Called with the main call-id lock held. On false, the lock has been
     // released or cleanup completed; the caller must return immediately
     // without accessing the Sender, SubDone, or main Controller.
     bool PushFree(const Resource& r);
     const Controller* SubController(int index) const;
-    void Run();
+    void Run() override;
     void Clear();
 
 private:

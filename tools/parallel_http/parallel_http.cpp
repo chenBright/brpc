@@ -44,7 +44,7 @@ struct AccessThreadArgs {
 
 class OnHttpCallEnd : public google::protobuf::Closure {
 public:
-    void Run();
+    void Run() override;
 public:
     brpc::Controller cntl;
     AccessThreadArgs* args;

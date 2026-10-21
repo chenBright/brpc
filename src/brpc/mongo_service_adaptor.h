@@ -37,7 +37,7 @@ class MongoContextMessage : public InputMessageBase {
 public:
     MongoContextMessage(MongoContext *context) : _context(context) {}
     // @InputMessageBase
-    void DestroyImpl() { delete this; }
+    void DestroyImpl() override { delete this; }
     MongoContext* context() { return _context.get(); }
 
 private:

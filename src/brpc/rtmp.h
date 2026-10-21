@@ -528,7 +528,7 @@ public:
     // before/during Init(), or multiple times, because the stream is not
     // destructed yet after calling Destroy(), otherwise the behavior is
     // undefined.
-    virtual void Destroy();
+    void Destroy() override;
 
     // Process media messages from the peer.
     // Following methods and OnStop() on the same stream are never called
@@ -924,14 +924,14 @@ public:
     RetryingClientMessageHandler(RtmpRetryingClientStream* parent);
     ~RetryingClientMessageHandler() {}
 
-    void OnPlayable();
-    void OnUserData(void*);
-    void OnCuePoint(brpc::RtmpCuePoint* cuepoint);
-    void OnMetaData(brpc::RtmpMetaData* metadata, const butil::StringPiece& name);
-    void OnAudioMessage(brpc::RtmpAudioMessage* msg);
-    void OnVideoMessage(brpc::RtmpVideoMessage* msg);
-    void OnSharedObjectMessage(RtmpSharedObjectMessage* msg);
-    void OnSubStreamStop(RtmpStreamBase* sub_stream);
+    void OnPlayable() override;
+    void OnUserData(void*) override;
+    void OnCuePoint(brpc::RtmpCuePoint* cuepoint) override;
+    void OnMetaData(brpc::RtmpMetaData* metadata, const butil::StringPiece& name) override;
+    void OnAudioMessage(brpc::RtmpAudioMessage* msg) override;
+    void OnVideoMessage(brpc::RtmpVideoMessage* msg) override;
+    void OnSharedObjectMessage(RtmpSharedObjectMessage* msg) override;
+    void OnSubStreamStop(RtmpStreamBase* sub_stream) override;
 
 private:
     butil::intrusive_ptr<RtmpRetryingClientStream> _parent;
@@ -958,7 +958,7 @@ public:
     RtmpRetryingClientStream();
 
     // Must be called to end this stream no matter Init() is called or not.
-    void Destroy();
+    void Destroy() override;
 
     // Initialize this stream with the given sub_stream_creator which may create a
     // different sub stream each time.
@@ -970,16 +970,16 @@ public:
     // If the stream is recreated, following methods may return -1 and set
     // errno to ERTMPPUBLISHABLE for once. (so that users can be notified to
     // resend metadata or header messages).
-    int SendCuePoint(const RtmpCuePoint&);
+    int SendCuePoint(const RtmpCuePoint&) override;
     int SendMetaData(const RtmpMetaData&,
-                     const butil::StringPiece& name = "onMetaData");
-    int SendSharedObjectMessage(const RtmpSharedObjectMessage& msg);
-    int SendAudioMessage(const RtmpAudioMessage& msg);
-    int SendAACMessage(const RtmpAACMessage& msg);
-    int SendVideoMessage(const RtmpVideoMessage& msg);
-    int SendAVCMessage(const RtmpAVCMessage& msg);
-    butil::EndPoint remote_side() const;
-    butil::EndPoint local_side() const;
+                     const butil::StringPiece& name = "onMetaData") override;
+    int SendSharedObjectMessage(const RtmpSharedObjectMessage& msg) override;
+    int SendAudioMessage(const RtmpAudioMessage& msg) override;
+    int SendAACMessage(const RtmpAACMessage& msg) override;
+    int SendVideoMessage(const RtmpVideoMessage& msg) override;
+    int SendAVCMessage(const RtmpAVCMessage& msg) override;
+    butil::EndPoint remote_side() const override;
+    butil::EndPoint local_side() const override;
 
     // Call this function to stop current stream. New sub stream will be
     // tried to be created later.

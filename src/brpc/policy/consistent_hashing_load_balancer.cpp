@@ -66,11 +66,11 @@ class DefaultReplicaPolicy : public ReplicaPolicy {
 public:
     DefaultReplicaPolicy(HashFunc hash) : _hash_func(hash) {}
 
-    virtual bool Build(ServerId server,
+    bool Build(ServerId server,
                        size_t num_replicas,
-                       std::vector<ConsistentHashingLoadBalancer::Node>* replicas) const;
+                       std::vector<ConsistentHashingLoadBalancer::Node>* replicas) const override;
 
-    virtual const char* name() const { return GetHashName(_hash_func); }
+    const char* name() const override { return GetHashName(_hash_func); }
 
 private:
     HashFunc _hash_func;
@@ -109,11 +109,11 @@ bool DefaultReplicaPolicy::Build(ServerId server,
 
 class KetamaReplicaPolicy : public ReplicaPolicy {
 public:
-    virtual bool Build(ServerId server,
+    bool Build(ServerId server,
                        size_t num_replicas,
-                       std::vector<ConsistentHashingLoadBalancer::Node>* replicas) const;
+                       std::vector<ConsistentHashingLoadBalancer::Node>* replicas) const override;
 
-    virtual const char* name() const { return "ketama"; }
+    const char* name() const override { return "ketama"; }
 };
 
 bool KetamaReplicaPolicy::Build(ServerId server,

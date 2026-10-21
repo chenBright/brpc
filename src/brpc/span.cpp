@@ -527,7 +527,7 @@ struct SpanEarlier {
 };
 class SpanPreprocessor : public bvar::CollectorPreprocessor {
 public:
-    void process(std::vector<bvar::Collected*> & list) {
+    void process(std::vector<bvar::Collected*> & list) override {
         // Sort spans by their starting time so that the code on making
         // time monotonic in Span::Index works better.
         std::sort(list.begin(), list.end(), SpanEarlier());

@@ -32,9 +32,9 @@ protected:
     ExtensionTest(){
     };
     virtual ~ExtensionTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 

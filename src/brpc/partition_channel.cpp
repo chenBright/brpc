@@ -48,8 +48,8 @@ public:
 private:
     bool initialized() const { return _parser != nullptr; }
     void PartitionServersIntoTemps(const std::vector<ServerId>& servers);
-    void OnAddedServers(const std::vector<ServerId>& servers);
-    void OnRemovedServers(const std::vector<ServerId>& servers);
+    void OnAddedServers(const std::vector<ServerId>& servers) override;
+    void OnRemovedServers(const std::vector<ServerId>& servers) override;
 
     struct SubChannel : public Channel {
         SharedLoadBalancer* lb() { return _lb.get(); }
@@ -330,7 +330,7 @@ public:
         }
     }
 
-    void OnAddedServers(const std::vector<ServerId>& servers) {
+    void OnAddedServers(const std::vector<ServerId>& servers) override {
         PartitionServersIntoTemps(servers);
         for (PartChanMap::const_iterator it = _part_chan_map.begin();
              it != _part_chan_map.end(); ++it) {
@@ -343,7 +343,7 @@ public:
         }
     }
     
-    void OnRemovedServers(const std::vector<ServerId>& servers) {
+    void OnRemovedServers(const std::vector<ServerId>& servers) override {
         PartitionServersIntoTemps(servers);
         std::vector<int> erased_parts;
         for (PartChanMap::const_iterator it = _part_chan_map.begin();

@@ -25,9 +25,9 @@ class TempFileTest : public ::testing::Test{
 protected:
     TempFileTest(){};
     virtual ~TempFileTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 

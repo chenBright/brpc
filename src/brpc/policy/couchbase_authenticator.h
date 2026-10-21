@@ -33,10 +33,10 @@ class CouchbaseAuthenticator : public Authenticator {
                          const std::string& bucket_password)
       : bucket_name_(bucket_name), bucket_password_(bucket_password) {}
 
-  int GenerateCredential(std::string* auth_str) const;
+  int GenerateCredential(std::string* auth_str) const override;
 
   int VerifyCredential(const std::string&, const butil::EndPoint&,
-                       brpc::AuthContext*) const {
+                       brpc::AuthContext*) const override {
     return 0;
   }
 

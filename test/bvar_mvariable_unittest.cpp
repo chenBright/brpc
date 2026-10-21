@@ -46,8 +46,8 @@ static const std::list<std::string> labels = {"idc", "method", "status"};
 
 class MVariableTest : public testing::Test {
 protected:
-    void SetUp() {}
-    void TearDown() {
+    void SetUp() override {}
+    void TearDown() override {
     }
 };
 

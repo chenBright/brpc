@@ -28,7 +28,7 @@ public:
     void Check(::google::protobuf::RpcController* cntl_base,
                const grpc::health::v1::HealthCheckRequest* request,
                grpc::health::v1::HealthCheckResponse* response,
-               ::google::protobuf::Closure* done);
+               ::google::protobuf::Closure* done) override;
 
 };
 

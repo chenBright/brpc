@@ -31,9 +31,9 @@
 namespace {
 class StatusTest : public testing::Test {
 protected:
-    void SetUp() {
+    void SetUp() override {
     }
-    void TearDown() {
+    void TearDown() override {
         ASSERT_EQ(0UL, bvar::Variable::count_exposed());
     }
 };

@@ -46,17 +46,17 @@ public:
     void ParseNsheadMeta(const Server& svr,
                         const NsheadMessage& request,
                         Controller*,
-                        NsheadMeta* out_meta) const;
+                        NsheadMeta* out_meta) const override;
 
     void ParseRequestFromIOBuf(
         const NsheadMeta& meta, const NsheadMessage& ns_req,
-        Controller* controller, google::protobuf::Message* pb_req) const;
+        Controller* controller, google::protobuf::Message* pb_req) const override;
 
     void SerializeResponseToIOBuf(
         const NsheadMeta& meta,
         Controller* controller,
         const google::protobuf::Message* pb_res,
-        NsheadMessage* ns_res) const;
+        NsheadMessage* ns_res) const override;
 };
 
 }  // namespace policy

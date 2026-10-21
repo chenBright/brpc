@@ -52,7 +52,7 @@ class MyEchoService : public ::brpc::policy::MongoService {
     void default_method(::google::protobuf::RpcController*,
                         const ::brpc::policy::MongoRequest* req,
                         ::brpc::policy::MongoResponse* res,
-                        ::google::protobuf::Closure* done) {
+                        ::google::protobuf::Closure* done) override {
         brpc::ClosureGuard done_guard(done);
 
         EXPECT_EQ(EXP_REQUEST, req->message());
@@ -76,7 +76,7 @@ public:
 
 class MyMongoAdaptor : public brpc::MongoServiceAdaptor {
 public:
-    virtual void SerializeError(int /*response_to*/, butil::IOBuf* out_buf) const {
+    void SerializeError(int /*response_to*/, butil::IOBuf* out_buf) const override {
         brpc::mongo_head_t header = {
             (int32_t)(sizeof(brpc::mongo_head_t) + sizeof(int32_t) * 3 +
                 sizeof(int64_t) + EXP_REQUEST.length()),
@@ -93,7 +93,7 @@ public:
         out_buf->append(EXP_RESPONSE);
     }
 
-    virtual ::brpc::MongoContext* CreateSocketContext() const {
+    ::brpc::MongoContext* CreateSocketContext() const override {
         return new MyContext;
     }
 };
@@ -117,8 +117,8 @@ protected:
     };
 
     virtual ~MongoTest() {};
-    virtual void SetUp() {};
-    virtual void TearDown() {};
+    void SetUp() override {};
+    void TearDown() override {};
 
     void ProcessMessage(void (*process)(brpc::InputMessageBase*),
                         brpc::InputMessageBase* msg, bool set_eof) {

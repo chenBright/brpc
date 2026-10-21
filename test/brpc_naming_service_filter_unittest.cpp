@@ -27,13 +27,13 @@
 
 class NamingServiceFilterTest : public testing::Test {
 protected:
-    void SetUp() {}
-    void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 }; 
 
 class MyNSFilter: public brpc::NamingServiceFilter {
 public:
-    bool Accept(const brpc::ServerNode& node) const {
+    bool Accept(const brpc::ServerNode& node) const override {
         return node.tag == "enable";
     }
 };

@@ -32,22 +32,22 @@ public:
     void sorttable(::google::protobuf::RpcController* controller,
                    const GetJsRequest* request,
                    GetJsResponse* response,
-                   ::google::protobuf::Closure* done);
+                   ::google::protobuf::Closure* done) override;
     
     void jquery_min(::google::protobuf::RpcController* controller,
                     const GetJsRequest* request,
                     GetJsResponse* response,
-                    ::google::protobuf::Closure* done);
+                    ::google::protobuf::Closure* done) override;
 
     void flot_min(::google::protobuf::RpcController* controller,
                   const GetJsRequest* request,
                   GetJsResponse* response,
-                  ::google::protobuf::Closure* done);
+                  ::google::protobuf::Closure* done) override;
 
     void viz_min(::google::protobuf::RpcController* controller,
                  const GetJsRequest* request,
                  GetJsResponse* response,
-                 ::google::protobuf::Closure* done);
+                 ::google::protobuf::Closure* done) override;
 };
 
 } // namespace brpc

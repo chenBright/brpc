@@ -36,10 +36,10 @@ public:
              const NamingServiceFilter* filter,
              const GetNamingServiceThreadOptions* options);
     
-    void OnAddedServers(const std::vector<ServerId>& servers);
-    void OnRemovedServers(const std::vector<ServerId>& servers);
+    void OnAddedServers(const std::vector<ServerId>& servers) override;
+    void OnRemovedServers(const std::vector<ServerId>& servers) override;
 
-    void Describe(std::ostream& os, const DescribeOptions& options);
+    void Describe(std::ostream& os, const DescribeOptions& options) override;
 
 private:
     butil::intrusive_ptr<NamingServiceThread> _nsthread_ptr;

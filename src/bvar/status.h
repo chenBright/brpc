@@ -97,7 +97,7 @@ public:
         true, detail::AddTo<T>, PlaceHolderOp>::type Op;
         explicit SeriesSampler(Status* owner)
             : _owner(owner), _series(Op()) {}
-        void take_sample() { _series.append(_owner->get_value()); }
+        void take_sample() override { _series.append(_owner->get_value()); }
         void describe(std::ostream& os) { _series.describe(os, nullptr); }
     private:
         Status* _owner;

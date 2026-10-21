@@ -133,10 +133,10 @@ private:
 class RedisTest : public testing::Test {
 protected:
     RedisTest() {}
-    void SetUp() {
+    void SetUp() override {
         pthread_once(&download_redis_server_once, RunRedisServer);
     }
-    void TearDown() {}
+    void TearDown() override {}
 };
 
 TEST(RedisCommandFormatTest, wide_numeric_conversion) {
@@ -1284,7 +1284,7 @@ public:
     brpc::RedisCommandHandlerResult Run(brpc::RedisConnContext* ctx,
                                         const std::vector<butil::StringPiece>& args,
                                         brpc::RedisReply* output,
-                                        bool flush_batched) {
+                                        bool flush_batched) override {
         if (args.size() < 1) {
             output->SetError("ERR wrong number of arguments for 'AUTH' command");
             return brpc::REDIS_CMD_HANDLED;
@@ -1313,7 +1313,7 @@ public:
     brpc::RedisCommandHandlerResult Run(brpc::RedisConnContext* ctx,
                                         const std::vector<butil::StringPiece>& args,
                                         brpc::RedisReply* output,
-                                        bool flush_batched) {
+                                        bool flush_batched) override {
         if (!ctx->session) {
             output->SetError("ERR no auth");
             return brpc::REDIS_CMD_HANDLED;
@@ -1355,7 +1355,7 @@ public:
     brpc::RedisCommandHandlerResult Run(brpc::RedisConnContext* ctx,
                                         const std::vector<butil::StringPiece>& args,
                                         brpc::RedisReply* output,
-                                        bool flush_batched) {
+                                        bool flush_batched) override {
         if (!ctx->session) {
             output->SetError("ERR no auth");
             return brpc::REDIS_CMD_HANDLED;
@@ -1399,7 +1399,7 @@ public:
     brpc::RedisCommandHandlerResult Run(brpc::RedisConnContext* ctx,
                                         const std::vector<butil::StringPiece>& args,
                                         brpc::RedisReply* output,
-                                        bool flush_batched) {
+                                        bool flush_batched) override {
         if (!ctx->session) {
             output->SetError("ERR no auth");
             return brpc::REDIS_CMD_HANDLED;

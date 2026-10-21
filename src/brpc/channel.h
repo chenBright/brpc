@@ -226,17 +226,17 @@ public:
                     google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request,
                     google::protobuf::Message* response,
-                    google::protobuf::Closure* done);
+                    google::protobuf::Closure* done) override;
 
     // Get current options.
     const ChannelOptions& options() const { return _options; }
 
-    void Describe(std::ostream&, const DescribeOptions&) const;
+    void Describe(std::ostream&, const DescribeOptions&) const override;
 
     // Sum of weights of servers that this channel connects to.
-    int Weight();
+    int Weight() override;
 
-    int CheckHealth();
+    int CheckHealth() override;
 
 protected:
     bool SingleServer() const { return _lb.get() == nullptr; }

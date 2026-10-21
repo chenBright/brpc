@@ -94,15 +94,15 @@ public:
                     google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request,
                     google::protobuf::Message* response,
-                    google::protobuf::Closure* done);
+                    google::protobuf::Closure* done) override;
 
     // True iff Init() was successful.
     bool initialized() const;
 
-    void Describe(std::ostream& os, const DescribeOptions& options) const;
+    void Describe(std::ostream& os, const DescribeOptions& options) const override;
 
 private:
-    int CheckHealth();
+    int CheckHealth() override;
     
     Channel _chan;
 };

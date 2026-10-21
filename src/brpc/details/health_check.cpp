@@ -50,7 +50,7 @@ int HealthCheckChannel::Init(SocketId id, const ChannelOptions* options) {
 
 class OnAppHealthCheckDone : public google::protobuf::Closure {
 public:
-    virtual void Run();
+    void Run() override;
 
     HealthCheckChannel channel;
     brpc::Controller cntl;

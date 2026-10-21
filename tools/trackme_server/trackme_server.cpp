@@ -64,7 +64,7 @@ public:
     void TrackMe(google::protobuf::RpcController* cntl_base,
                  const brpc::TrackMeRequest* request,
                  brpc::TrackMeResponse* response,
-                 google::protobuf::Closure* done) {
+                 google::protobuf::Closure* done) override {
         brpc::ClosureGuard done_guard(done);
         brpc::Controller* cntl = (brpc::Controller*)cntl_base;
         // Set to OK by default.

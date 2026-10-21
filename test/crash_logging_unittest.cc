@@ -17,14 +17,14 @@ std::map<std::string, std::string>* key_values_ = nullptr;
 
 class CrashLoggingTest : public testing::Test {
  public:
-  virtual void SetUp() {
+  void SetUp() override {
     key_values_ = new std::map<std::string, std::string>;
     butil::debug::SetCrashKeyReportingFunctions(
         &CrashLoggingTest::SetKeyValue,
         &CrashLoggingTest::ClearKeyValue);
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     butil::debug::ResetCrashLoggingForTesting();
 
     delete key_values_;

@@ -21,8 +21,8 @@
 
 class RepeatedFieldTest : public testing::Test {
 protected:
-    void SetUp() {}
-    void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 };
 
 TEST_F(RepeatedFieldTest, empty_array) {

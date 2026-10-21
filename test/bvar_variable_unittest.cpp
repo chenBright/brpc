@@ -61,9 +61,9 @@ std::string vec2string(const std::vector<T>& vec) {
 
 class VariableTest : public testing::Test {
 protected:
-    void SetUp() {
+    void SetUp() override {
     }
-    void TearDown() {
+    void TearDown() override {
         ASSERT_EQ(0UL, bvar::Variable::count_exposed());
     }
 };
@@ -229,7 +229,7 @@ TEST_F(VariableTest, expose) {
 class MyDumper : public bvar::Dumper {
 public:
     bool dump(const std::string& name,
-              const butil::StringPiece& description) {
+              const butil::StringPiece& description) override {
         _list.push_back(std::make_pair(name, description.as_string()));
         return true;
     }

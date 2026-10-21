@@ -28,7 +28,7 @@ public:
     void default_method(::google::protobuf::RpcController* controller,
                         const GetFaviconRequest* request,
                         GetFaviconResponse* response,
-                        ::google::protobuf::Closure* done);
+                        ::google::protobuf::Closure* done) override;
 };
 
 } // namespace brpc

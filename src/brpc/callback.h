@@ -168,7 +168,7 @@ class FunctionClosure1 : public ::google::protobuf::Closure {
       arg1_(arg1) {}
   ~FunctionClosure1() {}
 
-  void Run() {
+  void Run() override {
     bool needs_delete = self_deleting_;  // read in case callback deletes
     function_(arg1_);
     if (needs_delete) delete this;
@@ -215,7 +215,7 @@ class FunctionClosure2 : public ::google::protobuf::Closure {
       arg1_(arg1), arg2_(arg2) {}
   ~FunctionClosure2() {}
 
-  void Run() {
+  void Run() override {
     bool needs_delete = self_deleting_;  // read in case callback deletes
     function_(arg1_, arg2_);
     if (needs_delete) delete this;
@@ -264,7 +264,7 @@ class FunctionClosure3 : public ::google::protobuf::Closure {
       arg1_(arg1), arg2_(arg2), arg3_(arg3) {}
   ~FunctionClosure3() {}
 
-  void Run() {
+  void Run() override {
     bool needs_delete = self_deleting_;  // read in case callback deletes
     function_(arg1_, arg2_, arg3_);
     if (needs_delete) delete this;
@@ -315,7 +315,7 @@ class FunctionClosure4 : public ::google::protobuf::Closure {
       arg1_(arg1), arg2_(arg2), arg3_(arg3), arg4_(arg4) {}
   ~FunctionClosure4() {}
 
-  void Run() {
+  void Run() override {
     bool needs_delete = self_deleting_;  // read in case callback deletes
     function_(arg1_, arg2_, arg3_, arg4_);
     if (needs_delete) delete this;
@@ -341,7 +341,7 @@ class MethodClosure4 : public ::google::protobuf::Closure {
       arg1_(arg1), arg2_(arg2),arg3_(arg3),arg4_(arg4) {}
   ~MethodClosure4() {}
 
-  void Run() {
+  void Run() override {
     bool needs_delete = self_deleting_;  // read in case callback deletes
     (get_pointer(object_)->*method_)(arg1_, arg2_,arg3_,arg4_);
     if (needs_delete) delete this;

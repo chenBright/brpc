@@ -68,10 +68,10 @@ class ViewServiceImpl : public ViewService {
 public:
     ViewServiceImpl() {}
     virtual ~ViewServiceImpl() {}
-    virtual void default_method(google::protobuf::RpcController* cntl_base,
+    void default_method(google::protobuf::RpcController* cntl_base,
                                 const HttpRequest*,
                                 HttpResponse*,
-                                google::protobuf::Closure* done) {
+                                google::protobuf::Closure* done) override {
         brpc::ClosureGuard done_guard(done);
         brpc::Controller* server_cntl =
             static_cast<brpc::Controller*>(cntl_base);

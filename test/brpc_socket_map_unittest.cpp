@@ -56,8 +56,8 @@ class SocketMapTest : public ::testing::Test{
 protected:
     SocketMapTest(){};
     virtual ~SocketMapTest(){};
-    virtual void SetUp(){};
-    virtual void TearDown(){};
+    void SetUp() override{};
+    void TearDown() override{};
 };
 
 TEST_F(SocketMapTest, disable_health_check) {

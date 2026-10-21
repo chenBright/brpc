@@ -42,8 +42,8 @@ class ImportErrorPrinter
 public:
     // Line and column numbers are zero-based.  A line number of -1 indicates
     // an error with the entire file (e.g. "not found").
-    virtual void AddError(const std::string& filename, int line,
-                          int /*column*/, const std::string& message) {
+    void AddError(const std::string& filename, int line,
+                          int /*column*/, const std::string& message) override {
         LOG_AT(ERROR, filename.c_str(), line) << message;
     }
 

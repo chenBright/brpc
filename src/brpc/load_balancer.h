@@ -163,7 +163,7 @@ public:
         return n;
     }
 
-    virtual void Describe(std::ostream& os, const DescribeOptions&);
+    void Describe(std::ostream& os, const DescribeOptions&) override;
 
     virtual int Weight() {
         return _weight_sum.load(butil::memory_order_relaxed);

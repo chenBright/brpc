@@ -29,8 +29,8 @@ using brpc::http_parser_settings;
 
 class HttpParserTest : public testing::Test {
 protected:
-    void SetUp() {}
-    void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 };
 
 TEST_F(HttpParserTest, init_perf) {

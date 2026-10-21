@@ -111,14 +111,14 @@ public:
                     google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request,
                     google::protobuf::Message* response,
-                    google::protobuf::Closure* done);
+                    google::protobuf::Closure* done) override;
 
     int partition_count() const;
 
 private:
     bool initialized() const { return _parser != nullptr; }
 
-    int CheckHealth();
+    int CheckHealth() override;
 
     PartitionChannelBase* _pchan;
     butil::intrusive_ptr<NamingServiceThread> _nsthread_ptr;
@@ -151,12 +151,12 @@ public:
                     google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request,
                     google::protobuf::Message* response,
-                    google::protobuf::Closure* done);
+                    google::protobuf::Closure* done) override;
 
 private:
     bool initialized() const { return _parser != nullptr; }
 
-    int CheckHealth() {
+    int CheckHealth() override {
         return static_cast<ChannelBase*>(&_schan)->CheckHealth();
     }
 

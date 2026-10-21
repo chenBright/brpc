@@ -51,7 +51,7 @@ public:
     void Method(::google::protobuf::RpcController* cntl_base,
                 const ::test::GrpcRequest* req,
                 ::test::GrpcResponse* res,
-                ::google::protobuf::Closure* done) {
+                ::google::protobuf::Closure* done) override {
         brpc::Controller* cntl =
                 static_cast<brpc::Controller*>(cntl_base);
         brpc::ClosureGuard done_guard(done);
@@ -79,7 +79,7 @@ public:
     void MethodTimeOut(::google::protobuf::RpcController* cntl_base,
               const ::test::GrpcRequest* req,
               ::test::GrpcResponse* res,
-              ::google::protobuf::Closure* done) {
+              ::google::protobuf::Closure* done) override {
         brpc::ClosureGuard done_guard(done);
         bthread_usleep(2000000 /*2s*/);
         res->set_message(g_prefix + req->message());
@@ -110,8 +110,8 @@ protected:
     }
 
     virtual ~GrpcTest() {};
-    virtual void SetUp() {};
-    virtual void TearDown() {};
+    void SetUp() override {};
+    void TearDown() override {};
 
     void CallMethod(bool req_gzip, bool res_gzip) {
         test::GrpcRequest req;

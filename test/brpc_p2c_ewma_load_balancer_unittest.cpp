@@ -40,7 +40,7 @@ namespace {
 
 butil::atomic<size_t> nrecycle(0);
 class SaveRecycle : public brpc::SocketUser {
-    void BeforeRecycle(brpc::Socket* s) {
+    void BeforeRecycle(brpc::Socket* s) override {
         nrecycle.fetch_add(1, butil::memory_order_relaxed);
         delete this;
     }

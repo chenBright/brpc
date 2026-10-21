@@ -53,7 +53,7 @@ public:
     ~DebugSampler() {
         ++_s_ndestroy;
     }
-    void take_sample() {
+    void take_sample() override {
         ++_ncalled;
     }
     int called_count() const { return _ncalled; }

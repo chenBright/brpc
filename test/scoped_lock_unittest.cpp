@@ -25,9 +25,9 @@ protected:
     ScopedLockTest(){
     };
     virtual ~ScopedLockTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 

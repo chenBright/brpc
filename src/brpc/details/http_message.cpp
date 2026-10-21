@@ -407,11 +407,11 @@ int HttpMessage::OnMessageComplete() {
 class FailAllRead : public ProgressiveReader {
 public:
     // @ProgressiveReader
-    butil::Status OnReadOnePart(const void* /*data*/, size_t /*length*/) {
+    butil::Status OnReadOnePart(const void* /*data*/, size_t /*length*/) override {
         return butil::Status(-1, "Trigger by FailAllRead at %s:%d",
                             __FILE__, __LINE__);
     }
-    void OnEndOfMessage(const butil::Status&) {}
+    void OnEndOfMessage(const butil::Status&) override {}
 };
 
 static FailAllRead* s_fail_all_read = nullptr;

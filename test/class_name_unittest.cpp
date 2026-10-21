@@ -28,7 +28,7 @@ struct MyClass {};
 namespace {
 class ClassNameTest : public ::testing::Test {
 protected:
-    virtual void SetUp() {
+    void SetUp() override {
         srand(time(0));
     };
 };

@@ -120,7 +120,7 @@ public:
     // IOBufBytesIterator.
     ssize_t Decode(butil::IOBufBytesIterator& source, Header* h);
 
-    void Describe(std::ostream& os, const DescribeOptions&) const;
+    void Describe(std::ostream& os, const DescribeOptions&) const override;
     
 private:
     DISALLOW_COPY_AND_ASSIGN(HPacker);

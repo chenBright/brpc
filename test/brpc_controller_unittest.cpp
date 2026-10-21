@@ -34,8 +34,8 @@ class ControllerTest : public ::testing::Test{
 protected:
     ControllerTest() {};
     virtual ~ControllerTest(){};
-    virtual void SetUp() {};
-    virtual void TearDown() {};
+    void SetUp() override {};
+    void TearDown() override {};
 };
 
 void MyCancelCallback(bool* cancel_flag) {

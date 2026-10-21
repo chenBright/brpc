@@ -45,16 +45,16 @@ class PublicPbrpcServiceAdaptor : public NsheadPbServiceAdaptor {
 public:
     void ParseNsheadMeta(
         const Server& svr, const NsheadMessage& request, Controller*,
-        NsheadMeta* out_meta) const;
+        NsheadMeta* out_meta) const override;
 
     void ParseRequestFromIOBuf(
         const NsheadMeta& meta, const NsheadMessage& raw_req,
-        Controller* controller, google::protobuf::Message* pb_req) const;
+        Controller* controller, google::protobuf::Message* pb_req) const override;
 
     void SerializeResponseToIOBuf(
         const NsheadMeta& meta, Controller* controller,
         const google::protobuf::Message* pb_res,
-        NsheadMessage* raw_res) const;
+        NsheadMessage* raw_res) const override;
 };
 
 }  // namespace policy

@@ -35,9 +35,9 @@ class FlatMapTest : public ::testing::Test{
 protected:
     FlatMapTest(){};
     virtual ~FlatMapTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 

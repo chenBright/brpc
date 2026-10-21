@@ -51,11 +51,11 @@ class LogStateSaver {
 
 class LoggingTest : public testing::Test {
 public:
-    virtual void SetUp() {
+    void SetUp() override {
         _old_crash_on_fatal_log = ::logging::FLAGS_crash_on_fatal_log;
         ::logging::FLAGS_crash_on_fatal_log = true;
     }
-    virtual void TearDown() {
+    void TearDown() override {
         ::logging::FLAGS_crash_on_fatal_log = _old_crash_on_fatal_log;
         if (::logging::FLAGS_v != 0) {
             // Clear -verbose to avoid affecting other tests.

@@ -29,8 +29,8 @@ bool stopped = false;
 
 class ExecutionQueueTest : public testing::Test {
 protected:
-    void SetUp() { stopped = false; }
-    void TearDown() {}
+    void SetUp() override { stopped = false; }
+    void TearDown() override {}
 };
 
 struct LongIntTask {

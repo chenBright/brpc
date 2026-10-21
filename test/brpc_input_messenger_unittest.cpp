@@ -54,9 +54,9 @@ protected:
     MessengerTest(){
     };
     virtual ~MessengerTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 

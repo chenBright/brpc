@@ -40,7 +40,7 @@ struct BAIDU_CACHELINE_ALIGNMENT MostCommonMessage : public InputMessageBase {
     }
 
     // @InputMessageBase
-    void DestroyImpl() {
+    void DestroyImpl() override {
         meta.clear();
         payload.clear();
         pi.reset();

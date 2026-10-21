@@ -22,7 +22,7 @@ namespace {
 
 class UniquePtrTest : public testing::Test {
 protected:
-    virtual void SetUp() {
+    void SetUp() override {
     };
 };
 

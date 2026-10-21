@@ -170,10 +170,10 @@ Controller::~Controller() {
 class IgnoreAllRead : public ProgressiveReader {
 public:
     // @ProgressiveReader
-    butil::Status OnReadOnePart(const void* /*data*/, size_t /*length*/) {
+    butil::Status OnReadOnePart(const void* /*data*/, size_t /*length*/) override {
         return butil::Status::OK();
     }
-    void OnEndOfMessage(const butil::Status&) {}
+    void OnEndOfMessage(const butil::Status&) override {}
 };
 
 struct ProgressiveReadTimeoutTask;
@@ -1983,7 +1983,7 @@ void AskToQuit() {
 }
 
 class DoNothingClosure : public google::protobuf::Closure {
-    void Run() { }
+    void Run() override { }
 };
 google::protobuf::Closure* DoNothing() {
     return butil::get_leaky_singleton<DoNothingClosure>();

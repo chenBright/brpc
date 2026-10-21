@@ -24,10 +24,10 @@ protected:
     SynchronousEventTest(){
     };
     virtual ~SynchronousEventTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
         srand(time(0));
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 
@@ -42,7 +42,7 @@ class FooObserver : public FooEvent::Observer {
 public:
     FooObserver() : another_ob(nullptr) {}
     
-    void on_event(int x, int* p) {
+    void on_event(int x, int* p) override {
         ++*p;
         result.push_back(std::make_pair(x, *p));
         if (another_ob) {

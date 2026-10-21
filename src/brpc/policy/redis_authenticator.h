@@ -29,10 +29,10 @@ public:
     RedisAuthenticator(const std::string& passwd, int db = -1)
         : passwd_(passwd), db_(db) {}
 
-    int GenerateCredential(std::string* auth_str) const;
+    int GenerateCredential(std::string* auth_str) const override;
 
     int VerifyCredential(const std::string&, const butil::EndPoint&,
-                         brpc::AuthContext*) const {
+                         brpc::AuthContext*) const override {
         return 0;
     }
 

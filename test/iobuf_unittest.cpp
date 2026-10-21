@@ -127,9 +127,9 @@ class IOBufTest : public ::testing::Test{
 protected:
     IOBufTest(){};
     virtual ~IOBufTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
         check_memory_leak();
     };
 };

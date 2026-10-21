@@ -187,10 +187,10 @@ static void RunMemcached() {
 class MemcacheTest : public testing::Test {
 protected:
     MemcacheTest() {}
-    void SetUp() {
+    void SetUp() override {
         pthread_once(&download_memcached_once, RunMemcached);
     }
-    void TearDown() {
+    void TearDown() override {
     }
 };
 

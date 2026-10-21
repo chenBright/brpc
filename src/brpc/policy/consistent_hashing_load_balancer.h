@@ -62,14 +62,14 @@ public:
         }
     };
     explicit ConsistentHashingLoadBalancer(ConsistentHashingLoadBalancerType type);
-    bool AddServer(const ServerId& server);
-    bool RemoveServer(const ServerId& server);
-    size_t AddServersInBatch(const std::vector<ServerId> &servers);
-    size_t RemoveServersInBatch(const std::vector<ServerId> &servers);
-    LoadBalancer *New(const butil::StringPiece& params) const;
-    void Destroy();
-    int SelectServer(const SelectIn &in, SelectOut *out);
-    void Describe(std::ostream &os, const DescribeOptions& options);
+    bool AddServer(const ServerId& server) override;
+    bool RemoveServer(const ServerId& server) override;
+    size_t AddServersInBatch(const std::vector<ServerId> &servers) override;
+    size_t RemoveServersInBatch(const std::vector<ServerId> &servers) override;
+    LoadBalancer *New(const butil::StringPiece& params) const override;
+    void Destroy() override;
+    int SelectServer(const SelectIn &in, SelectOut *out) override;
+    void Describe(std::ostream &os, const DescribeOptions& options) override;
 
 protected:
     bool SetParameters(const butil::StringPiece& params);

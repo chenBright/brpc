@@ -40,11 +40,11 @@ public:
           _params(params.data(), params.size()),
           _collation(collation.data(), collation.size()) {}
 
-    int GenerateCredential(std::string* auth_str) const {
+    int GenerateCredential(std::string* auth_str) const override {
         return 0;
     }
 
-    int VerifyCredential(const std::string&, const butil::EndPoint&, brpc::AuthContext*) const {
+    int VerifyCredential(const std::string&, const butil::EndPoint&, brpc::AuthContext*) const override {
         return 0;
     }
 

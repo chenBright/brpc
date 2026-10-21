@@ -24,8 +24,8 @@
 #include "brpc/http_status_code.h"
 
 class HttpStatusTest : public testing::Test {
-    void SetUp() {}
-    void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 };
 
 TEST_F(HttpStatusTest, sanity) {

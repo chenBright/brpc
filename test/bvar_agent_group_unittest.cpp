@@ -43,8 +43,8 @@ const size_t OPS_PER_THREAD = 2000000;
 class AgentGroupTest : public testing::Test {
 protected:
     typedef butil::atomic<uint64_t>                             agent_type;
-    void SetUp() {}
-    void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 
     static void *thread_counter(void *arg) {
         int id = (int)((long)arg);

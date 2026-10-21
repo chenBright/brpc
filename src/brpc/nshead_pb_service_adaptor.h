@@ -86,7 +86,7 @@ private:
     void ProcessNsheadRequest(
         const Server& server, Controller* controller,
         const NsheadMessage& request, NsheadMessage* response,
-        NsheadClosure* done);
+        NsheadClosure* done) override;
 };
 
 } // namespace brpc

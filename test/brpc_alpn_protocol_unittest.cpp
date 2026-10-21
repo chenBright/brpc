@@ -57,7 +57,7 @@ public:
     ALPNTest() = default;
     virtual ~ALPNTest() = default;
 
-    virtual void SetUp() override { 
+    void SetUp() override {
         // Start brpc server with SSL
         brpc::ServerOptions server_options;
         auto&& ssl_options = server_options.mutable_ssl_options();
@@ -70,7 +70,7 @@ public:
         ASSERT_EQ(0, _server.Start(FLAGS_listen_addr.data(), &server_options));
     }
     
-    virtual void TearDown() override {
+    void TearDown() override {
         _server.Stop(0);
         _server.Join();
     }

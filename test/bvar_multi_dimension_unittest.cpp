@@ -160,8 +160,8 @@ static long start_perf_test_with_mintrecorder(size_t num_thread, bvar::IntRecord
 
 class MultiDimensionTest : public testing::Test {
 protected:
-    void SetUp() {}
-    void TearDown() {
+    void SetUp() override {}
+    void TearDown() override {
     }
 };
 

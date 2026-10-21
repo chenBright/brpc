@@ -24,10 +24,10 @@ class StringSplitterTest : public ::testing::Test{
 protected:
     StringSplitterTest(){};
     virtual ~StringSplitterTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
         srand (time(0));
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
 

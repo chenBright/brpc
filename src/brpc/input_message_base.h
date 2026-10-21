@@ -33,7 +33,7 @@ protected:
     
 public:
     // Called to release the memory of this message instead of "delete"
-    void Destroy();
+    void Destroy() override;
     
     // Own the socket where this message is from.
     Socket* ReleaseSocket();

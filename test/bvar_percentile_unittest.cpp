@@ -24,8 +24,8 @@
 
 class PercentileTest : public testing::Test {
 protected:
-    void SetUp() {}
-    void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 };
 
 #if !WITH_BABYLON_COUNTER

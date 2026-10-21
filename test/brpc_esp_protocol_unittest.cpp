@@ -63,8 +63,8 @@ protected:
     };
 
     virtual ~EspTest() {};
-    virtual void SetUp() {};
-    virtual void TearDown() {};
+    void SetUp() override {};
+    void TearDown() override {};
 
     void WriteResponse(brpc::Controller& cntl, int msg) {
         brpc::EspMessage req;

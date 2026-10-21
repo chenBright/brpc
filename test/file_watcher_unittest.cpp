@@ -24,9 +24,9 @@ class FileWatcherTest : public ::testing::Test{
 protected:
     FileWatcherTest(){};
     virtual ~FileWatcherTest(){};
-    virtual void SetUp() {
+    void SetUp() override {
     };
-    virtual void TearDown() {
+    void TearDown() override {
     };
 };
  
