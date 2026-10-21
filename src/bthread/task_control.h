@@ -71,11 +71,34 @@ public:
     void stop_and_join();
     
     // Get # of worker threads.
-    int concurrency() const 
-    { return _concurrency.load(butil::memory_order_acquire); }
+    int concurrency() const {
+        return _concurrency.load(butil::memory_order_acquire);
+    }
 
-    int concurrency(bthread_tag_t tag) const 
-    { return _tagged_ngroup[tag].load(butil::memory_order_acquire); }
+    int concurrency(bthread_tag_t tag) const {
+        return _tagged_nworker[tag].load(butil::memory_order_acquire);
+    }
+
+    // Get # of worker threads dedicated to bthreads (event dispatchers, epoll threads).
+    // Those workers can never run anything else, so they're excluded from the concurrency
+    // configured via bthread_setconcurrency*(). See reserve_workers().
+    int nreserved() const {
+        return _nreserved.load(butil::memory_order_acquire);
+    }
+
+    int nreserved(bthread_tag_t tag) const {
+        return _tagged_nreserved[tag].load(butil::memory_order_acquire);
+    }
+
+    // Get # of worker threads available to ordinary bthreads, which is what
+    // bthread_setconcurrency*() and -bthread_concurrency configure.
+    int usable_concurrency() const {
+        return concurrency() - nreserved();
+    }
+
+    int usable_concurrency(bthread_tag_t tag) const {
+        return concurrency(tag) - nreserved(tag);
+    }
 
     void print_rq_sizes(std::ostream& os);
 
@@ -84,9 +107,21 @@ public:
     int64_t get_cumulated_switch_count();
     int64_t get_cumulated_signal_count();
 
-    // [Not thread safe] Add more worker threads.
-    // Return the number of workers actually added, which may be less than |num|
-    int add_workers(int num, bthread_tag_t tag);
+    // [Not thread safe] Add more worker threads. The added workers are counted
+    // as reserved ones when `reserved` is true, see reserve_workers().
+    // A tag never gets more than BTHREAD_MAX_CONCURRENCY workers in total,
+    // reserved ones included, as that's all _tagged_groups[tag] can hold.
+    // Return the number of workers actually added, which may be less than `num`.
+    int add_workers(int num, bthread_tag_t tag, bool reserved);
+
+    // [Not thread safe] Add `num` worker threads of `tag` and mark them as
+    // reserved, so that they don't count towards the concurrency configured
+    // via bthread_setconcurrency*(). They do count towards the
+    // BTHREAD_MAX_CONCURRENCY limit of the tag though.
+    // Return the number of workers actually added, which may be less than `num`.
+    int reserve_workers(int num, bthread_tag_t tag) {
+        return add_workers(num, tag, true);
+    }
 
     // Choose one TaskGroup (randomly right now).
     // If this method is called after init(), it never returns nullptr.
@@ -159,6 +194,12 @@ private:
     butil::atomic<bool> _init;  // if not init, bvar will case coredump
     bool _stop;
     butil::atomic<int> _concurrency;
+    // # of worker threads of each tag, the per-tag counterpart of _concurrency.
+    std::vector<butil::atomic<int>> _tagged_nworker;
+    // Subset of _concurrency / _tagged_nworker reserved for bthreads.
+    // Only grows, always under g_task_control_mutex.
+    butil::atomic<int> _nreserved;
+    std::vector<butil::atomic<int>> _tagged_nreserved;
     std::vector<pthread_t> _workers;
     bvar::Adder<int64_t> _nworkers;
     butil::Mutex _pending_time_mutex;

@@ -37,7 +37,7 @@ void* dummy(void*) {
 }
 
 TEST(BthreadTest, setconcurrency) {
-    ASSERT_EQ(8 + BTHREAD_EPOLL_THREAD_NUM, (size_t)bthread_getconcurrency());
+    ASSERT_EQ(8, bthread_getconcurrency());
     ASSERT_EQ(EINVAL, bthread_setconcurrency(BTHREAD_MIN_CONCURRENCY - 1));
     ASSERT_EQ(EINVAL, bthread_setconcurrency(0));
     ASSERT_EQ(EINVAL, bthread_setconcurrency(-1));
@@ -220,6 +220,128 @@ TEST(BthreadTest, concurrency_by_tag) {
     ASSERT_EQ(bthread_getconcurrency(), con+1);
     bthread_setconcurrency(con + 1);
     ASSERT_EQ(concurrency_by_tag(con + 1), true);
+}
+
+// The tests below only assert on deltas: concurrency can never be reduced, so
+// the tests above leave it at an unspecified value. Keep them last in the file
+// as they make g_task_control->concurrency() exceed bthread_getconcurrency().
+
+TEST(BthreadTest, reserve_concurrency_invalid_args) {
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(0, BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(-1, BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(1, BTHREAD_TAG_DEFAULT - 1));
+    // Only one tag by default.
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(1, BTHREAD_TAG_DEFAULT + 1));
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(
+                      BTHREAD_MAX_CONCURRENCY + 1, BTHREAD_TAG_DEFAULT));
+    // Reserved workers take a slot in _tagged_groups[tag] just like ordinary
+    // ones, so the limit applies to their sum, not to the reservation alone.
+    const int room = BTHREAD_MAX_CONCURRENCY -
+        bthread::g_task_control->concurrency(BTHREAD_TAG_DEFAULT);
+    ASSERT_GT(room, 0);
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(room + 1, BTHREAD_TAG_DEFAULT));
+}
+
+// Reserved workers are extra: they raise the number of worker pthreads but not
+// the concurrency configured by the user.
+TEST(BthreadTest, reserve_concurrency_is_not_counted) {
+    const int usable = bthread_getconcurrency();
+    const int nworkers = bthread::g_task_control->concurrency();
+    const int nreserved = bthread::g_task_control->nreserved();
+    ASSERT_EQ(usable, nworkers - nreserved);
+    // Only one tag by default, so the per-tag counters must match the totals.
+    ASSERT_EQ(usable, bthread_getconcurrency_by_tag(BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(nreserved, bthread::g_task_control->nreserved(BTHREAD_TAG_DEFAULT));
+
+    const int k = 3;
+    ASSERT_EQ(0, bthread_reserve_concurrency_by_tag(k, BTHREAD_TAG_DEFAULT));
+    // Both the totals and the reserved counters are updated by add_workers(),
+    // so all of this holds as soon as it returns, without waiting for the new
+    // worker pthreads to register their TaskGroup.
+    ASSERT_EQ(nworkers + k, bthread::g_task_control->concurrency());
+    ASSERT_EQ(nreserved + k, bthread::g_task_control->nreserved());
+    ASSERT_EQ(nreserved + k, bthread::g_task_control->nreserved(BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(usable, bthread_getconcurrency());
+    ASSERT_EQ(usable, bthread::g_task_control->usable_concurrency());
+    ASSERT_EQ(usable, bthread_getconcurrency_by_tag(BTHREAD_TAG_DEFAULT));
+}
+
+// Asking for N workers must yield N runnable ones no matter whether the reservation
+// happens before or after the request.
+TEST(BthreadTest, reserve_concurrency_is_order_independent) {
+    // Assert on the real worker count, so turn off the lazy worker creation
+    // left enabled by the min_concurrency test above.
+    ASSERT_EQ(1, set_min_concurrency(0));
+    const int k = 2;
+    const int delta = 10;
+
+    // reserve -> setconcurrency
+    int usable = bthread_getconcurrency();
+    int nreserved = bthread::g_task_control->nreserved();
+    ASSERT_EQ(0, bthread_reserve_concurrency_by_tag(k, BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(0, bthread_setconcurrency(usable + delta));
+    ASSERT_EQ(usable + delta, bthread_getconcurrency());
+    ASSERT_EQ(nreserved + k, bthread::g_task_control->nreserved());
+    ASSERT_EQ(usable + delta, bthread::g_task_control->usable_concurrency());
+    ASSERT_EQ(usable + delta + nreserved + k,
+              bthread::g_task_control->concurrency());
+
+    // setconcurrency -> reserve, same outcome.
+    usable = bthread_getconcurrency();
+    nreserved = bthread::g_task_control->nreserved();
+    ASSERT_EQ(0, bthread_setconcurrency(usable + delta));
+    ASSERT_EQ(0, bthread_reserve_concurrency_by_tag(k, BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(usable + delta, bthread_getconcurrency());
+    ASSERT_EQ(nreserved + k, bthread::g_task_control->nreserved());
+    ASSERT_EQ(usable + delta, bthread::g_task_control->usable_concurrency());
+    ASSERT_EQ(usable + delta + nreserved + k,
+              bthread::g_task_control->concurrency());
+}
+
+// Reloading -bthread_concurrency with the same value must not make the worker
+// count creep upwards by the reserved amount each time.
+TEST(BthreadTest, reserve_concurrency_no_creep_on_flag_reload) {
+    ASSERT_EQ(0, bthread_reserve_concurrency_by_tag(2, BTHREAD_TAG_DEFAULT));
+    const int usable = bthread_getconcurrency();
+    const int nworkers = bthread::g_task_control->concurrency();
+    for (int i = 0; i < 3; ++i) {
+        std::stringstream ss;
+        ss << usable;
+        ASSERT_FALSE(GFLAGS_NAMESPACE::SetCommandLineOption(
+                     "bthread_concurrency", ss.str().c_str()).empty());
+        ASSERT_EQ(usable, bthread_getconcurrency());
+        ASSERT_EQ(nworkers, bthread::g_task_control->concurrency());
+    }
+}
+
+TEST(BthreadTest, setconcurrency_by_tag_no_creep) {
+    const int target = bthread_getconcurrency_by_tag(BTHREAD_TAG_DEFAULT) + 5;
+    ASSERT_EQ(0, bthread_setconcurrency_by_tag(target, BTHREAD_TAG_DEFAULT));
+    const int nworkers = bthread::g_task_control->concurrency();
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_EQ(0, bthread_setconcurrency_by_tag(target, BTHREAD_TAG_DEFAULT));
+        ASSERT_EQ(target, bthread_getconcurrency_by_tag(BTHREAD_TAG_DEFAULT));
+        ASSERT_EQ(nworkers, bthread::g_task_control->concurrency());
+    }
+}
+
+// Keep this last, it maxes out the concurrency of the default tag.
+TEST(BthreadTest, concurrency_limit_counts_reserved_workers) {
+    ASSERT_EQ(0, bthread_reserve_concurrency_by_tag(1, BTHREAD_TAG_DEFAULT));
+    const int nreserved = bthread::g_task_control->nreserved(BTHREAD_TAG_DEFAULT);
+    ASSERT_GT(nreserved, 0);
+    // Ask for every slot of the tag to be usable, which is nreserved too many.
+    ASSERT_EQ(EPERM, bthread_setconcurrency_by_tag(
+        BTHREAD_MAX_CONCURRENCY, BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(BTHREAD_MAX_CONCURRENCY,
+              bthread::g_task_control->concurrency(BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(BTHREAD_MAX_CONCURRENCY - nreserved,
+              bthread_getconcurrency_by_tag(BTHREAD_TAG_DEFAULT));
+    // No slot left, so a further reservation is refused instead of adding a
+    // worker whose TaskGroup would be dropped.
+    ASSERT_EQ(EINVAL, bthread_reserve_concurrency_by_tag(1, BTHREAD_TAG_DEFAULT));
+    ASSERT_EQ(BTHREAD_MAX_CONCURRENCY,
+              bthread::g_task_control->concurrency(BTHREAD_TAG_DEFAULT));
 }
 
 } // namespace

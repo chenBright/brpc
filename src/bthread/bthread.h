@@ -151,8 +151,11 @@ extern int bthread_getattr(bthread_t bt, bthread_attr_t* attr);
 // Functions for scheduling control.
 // ---------------------------------------------
 
-// Get number of worker pthreads
-extern int bthread_getconcurrency(void);
+// Get number of worker pthreads available to ordinary bthreads. Workers
+// reserved by bthread_reserve_concurrency_by_tag() are excluded, so this may
+// be less than the number of worker pthreads actually running (see bvar
+// `bthread_worker_count').
+extern int bthread_getconcurrency();
 
 // Set number of worker pthreads to `num'. After a successful call,
 // bthread_getconcurrency() shall return new set number, but workers may
@@ -160,11 +163,28 @@ extern int bthread_getconcurrency(void);
 // NOTE: currently concurrency cannot be reduced after any bthread created.
 extern int bthread_setconcurrency(int num);
 
-// Get number of worker pthreads by tag
+// Get number of worker pthreads by tag, excluding reserved ones.
 extern int bthread_getconcurrency_by_tag(bthread_tag_t tag);
 
 // Set number of worker pthreads to `num' for specified tag
 extern int bthread_setconcurrency_by_tag(int num, bthread_tag_t tag);
+
+// Reserve `num` extra worker pthreads of `tag` to host bthreads that never
+// return to the scheduler, such as one looping over epoll_wait(..., -1). Those
+// bthreads keep their worker pthread to themselves for good: bthreads are not
+// preemptible, so the worker cannot run anything else, no matter whether such a
+// bthread is blocked in the syscall or busy handling what it returned.
+// Reserved workers are created eagerly and are NOT counted towards the
+// concurrency configured by bthread_setconcurrency(),
+// bthread_setconcurrency_by_tag() or -bthread_concurrency. Hence a caller
+// asking for N workers always gets N runnable ones, no matter whether the
+// reservation happens before or after the request -- up to
+// BTHREAD_MAX_CONCURRENCY workers per tag, which reserved ones count towards
+// as well. Whichever call runs into that limit is the one that fails.
+// MUST be called before starting such a bthread, and exactly once per
+// bthread, otherwise the reservation is either useless or leaks a worker.
+// Returns 0 on success, error code otherwise.
+extern int bthread_reserve_concurrency_by_tag(int num, bthread_tag_t tag);
 
 // Yield processor to another bthread. 
 // Notice that current implementation is not fair, which means that 
