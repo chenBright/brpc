@@ -386,6 +386,12 @@ void SubDone::Run() {
     // connection_type may be changed during CallMethod. 
     main_cntl->set_connection_type(_cntl.connection_type());
     main_cntl->response_attachment().swap(_cntl.response_attachment());
+
+    if (!_cntl.response_device_attachment().empty()) {
+        _cntl.response_device_attachment().clear();
+        _cntl.SetFailed(EDEVICECHANNEL,
+                       "SelectiveChannel does not support device attachments");
+    }
     
     if (_cntl.Failed()) {
         if (_cntl.ErrorCode() == ENODATA || _cntl.ErrorCode() == EHOSTDOWN) {
@@ -585,6 +591,12 @@ void SelectiveChannel::CallMethod(
     google::protobuf::Message* response,
     google::protobuf::Closure* user_done) {
     Controller* cntl = static_cast<Controller*>(controller_base);
+    if (!cntl->request_device_attachment().empty()) {
+        cntl->SetFailed(EINVAL,
+                        "SelectiveChannel does not support device attachments");
+        // Let the regular completion path finish call_id and invoke done,
+        // including asynchronous callers that Join() a rejected request.
+    }
     if (!initialized()) {
         cntl->SetFailed(EINVAL, "SelectiveChannel=%p is not initialized yet",
                         this);

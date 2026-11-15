@@ -106,8 +106,27 @@ struct ChannelOptions {
     const ChannelSSLOptions& ssl_options() const { return *_ssl_options; }
     ChannelSSLOptions* mutable_ssl_options();
 
-    // Let this channel choose a transport.
-    // See SocketMode for supported values.
+    // Which transport this channel's connections use. See SocketMode for the
+    // full list; SOCKET_MODE_RDMA_AND_DEVICE is RDMA plus the second channel
+    // that carries Controller's device attachment, and has three consequences,
+    // all at connection scope:
+    //   * the RDMA handshake proposes a device channel. Channels that stay on
+    //     SOCKET_MODE_RDMA do not pay for the peer's receive blocks
+    //     (rdma_rq_size * -rdma_gdr_recv_block_size of registered memory).
+    //   * if the peer declines, the connection fails instead of silently
+    //     coming up host-only. Better here than as one EDEVICECHANNEL per
+    //     RPC for the life of the process.
+    //   * it joins the ChannelSignature, so these connections are never
+    //     shared with a channel that did not ask. That isolation is what
+    //     makes the failure above safe, and it is not optional: the device
+    //     channel forces connection_type=single, and single connections are
+    //     pooled by signature across channels, so without it whichever
+    //     channel connected first would decide for everyone.
+    //
+    // What the attachment is made of is NOT part of this. That is
+    // -rdma_attachment_memory, a local decision at each end, and the two ends
+    // need not agree -- see docs/cn/gdr_design.md.
+    //
     // Default: SOCKET_MODE_TCP
     SocketMode socket_mode;
 

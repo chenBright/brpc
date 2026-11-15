@@ -16,6 +16,8 @@
 // under the License.
 
 
+#include <deque>
+
 #include <google/protobuf/descriptor.h>         // MethodDescriptor
 #include <google/protobuf/message.h>            // Message
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
@@ -31,6 +33,7 @@
 #include "json2pb/json_to_pb.h"
 #include "json2pb/pb_to_json.h"
 #include "brpc/controller.h"                    // Controller
+#include "brpc/destroyable.h"                   // Destroyable
 #include "brpc/socket.h"                        // Socket
 #include "brpc/server.h"                        // Server
 #include "brpc/span.h"
@@ -46,6 +49,7 @@
 #include "brpc/details/usercode_backup_pool.h"
 #include "brpc/details/controller_private_accessor.h"
 #include "brpc/details/server_private_accessor.h"
+#include "brpc/rdma/device_memory.h"
 
 extern "C" {
 void bthread_assign_data(void* data);
@@ -71,30 +75,64 @@ DECLARE_bool(pb_enum_as_number);
 // 4. `attachment_size' is set iff request/response has attachment
 // 5. Not supported: chunk_info
 
-// Pack header into `buf'
-inline void PackRpcHeader(char* rpc_header, uint32_t meta_size, int payload_size) {
+// A second framing shares this parser on GDR-negotiated connections:
+//
+//   PRPC  12B  ['P''R''P''C'][body_size:u32][meta_size:u32]
+//   GDR2  24B  [magic][body_size:u32][meta_size:u32][device_size:u32][offset:u64]
+//
+// GDR2 is used only by the messages that actually carry GPU memory; every
+// other message on the same connection still uses PRPC, so a small RPC pays
+// nothing. Keeping device_size at a fixed byte offset is the whole point:
+// the parser can tell whether a message has a device half by arithmetic
+// alone. The alternative -- reading it out of the meta -- would put a
+// protobuf parse inside the socket's serialized input section, on every
+// message of the connection rather than just the ones carrying tensors.
+// See docs/cn/gdr_design.md section 7.1.
+static const size_t RPC_HEADER_SIZE = 12;
+static const size_t GDR_HEADER_SIZE = 24;
+
+// Pack header into `buf'. `device_size' > 0 selects the GDR2 framing.
+// Returns the number of bytes written.
+//
+// device_size is deliberately NOT folded into body_size: those bytes travel
+// on the connection's second QP and never enter the host stream.
+inline size_t PackRpcHeader(char* rpc_header, uint32_t meta_size,
+                            int payload_size, uint32_t device_size,
+                            uint64_t device_offset = 0) {
     uint32_t* dummy = (uint32_t*)rpc_header;  // suppress strict-alias warning
-    *dummy = *(uint32_t*)"PRPC";
+    if (BAIDU_LIKELY(device_size == 0)) {
+        *dummy = *(uint32_t*)"PRPC";
+        butil::RawPacker(rpc_header + 4)
+            .pack32(meta_size + payload_size)
+            .pack32(meta_size);
+        return RPC_HEADER_SIZE;
+    }
+    *dummy = *(uint32_t*)"GDR2";
     butil::RawPacker(rpc_header + 4)
         .pack32(meta_size + payload_size)
-        .pack32(meta_size);
+        .pack32(meta_size)
+        .pack32(device_size)
+        .pack64(device_offset);
+    return GDR_HEADER_SIZE;
 }
 
 static void SerializeRpcHeaderAndMeta(
     butil::IOBuf* out, const RpcMeta& meta, int payload_size) {
     const uint32_t meta_size = GetProtobufByteSize(meta);
+    const size_t header_size = RPC_HEADER_SIZE;
     if (meta_size <= 244) { // most common cases
-        char header_and_meta[12 + meta_size];
-        PackRpcHeader(header_and_meta, meta_size, payload_size);
-        ::google::protobuf::io::ArrayOutputStream arr_out(header_and_meta + 12, meta_size);
+        char header_and_meta[header_size + meta_size];
+        PackRpcHeader(header_and_meta, meta_size, payload_size, 0);
+        ::google::protobuf::io::ArrayOutputStream arr_out(
+            header_and_meta + header_size, meta_size);
         ::google::protobuf::io::CodedOutputStream coded_out(&arr_out);
         meta.SerializeWithCachedSizes(&coded_out); // not calling ByteSize again
         CHECK(!coded_out.HadError());
         CHECK_EQ(0, out->append(header_and_meta, sizeof(header_and_meta)));
     } else {
-        char header[12];
-        PackRpcHeader(header, meta_size, payload_size);
-        CHECK_EQ(0, out->append(header, sizeof(header)));
+        char header[RPC_HEADER_SIZE];
+        PackRpcHeader(header, meta_size, payload_size, 0);
+        CHECK_EQ(0, out->append(header, header_size));
         butil::IOBufAsZeroCopyOutputStream buf_stream(out);
         ::google::protobuf::io::CodedOutputStream coded_out(&buf_stream);
         meta.SerializeWithCachedSizes(&coded_out);
@@ -102,47 +140,294 @@ static void SerializeRpcHeaderAndMeta(
     }
 }
 
+// A baidu_std message that carries a DeviceAttachment.
+//
+// Why this cannot be a plain IOBuf: on a connection with a second QP the
+// device stream has no framing, so the k-th device segment on the wire
+// belongs to the k-th device-carrying host message. Socket::Write() is a
+// lock-free MPSC enqueue -- the order concurrent writers call it in is NOT
+// the order they reach the wire -- so the device append has to happen where
+// the order is already fixed. AppendAndDestroySelf() is that place: Socket
+// runs it over the already-linked list from oldest to newest, i.e. in exact
+// write order. See docs/cn/gdr_design.md section 8.1.
+//
+// The constructor serializes meta and body on the calling thread; the writer
+// adds the header once the device stream offset is known.
+// AppendAndDestroySelf() checks the negotiated device channel before queuing
+// either half. A connection without that channel fails with EDEVICECHANNEL.
+class DeviceMessage : public SocketMessage {
+public:
+    // Takes over both `body' (the serialized response/request plus any host
+    // attachment) and `device_data'. Only ever constructed with a non-empty
+    // `device_data', hence always the GDR2 framing.
+    DeviceMessage(const RpcMeta& meta, butil::IOBuf* body,
+                  DeviceAttachment* device_data) {
+        _device_data.swap(*device_data);
+        DCHECK(!_device_data.empty());
+        DCHECK_LE(_device_data.size(), rdma::MaxDeviceAttachmentSize());
+        _meta_size = GetProtobufByteSize(meta);
+        _body_size = body->size();
+        {
+            butil::IOBufAsZeroCopyOutputStream stream(&_meta_and_body);
+            CHECK(meta.SerializeToZeroCopyStream(&stream));
+        }
+        _meta_and_body.append(body->movable());
+    }
+
+    butil::Status AppendAndDestroySelf(butil::IOBuf* out, Socket* sock) override {
+        std::unique_ptr<DeviceMessage> destroy_self(this);
+        if (sock == nullptr) {
+            // Abandoned before reaching the wire. ~DeviceAttachment frees the
+            // GPU memory, which is the whole point of routing it through here.
+            return butil::Status::OK();
+        }
+        DeviceStream* device_stream = sock->device_stream();
+        if (device_stream == nullptr) {
+            const butil::Status error(EDEVICECHANNEL,
+                    "No negotiated device channel on %s",
+                    sock->description().c_str());
+            // Setup() reports a message error only to id_wait, which is
+            // normally absent for server responses. Fail the connection as
+            // well so its peer observes the failure instead of timing out.
+            sock->SetFailed(error.error_code(), "%s", error.error_cstr());
+            return error;
+        }
+        char header[GDR_HEADER_SIZE];
+        PackRpcHeader(header, _meta_size, _body_size, _device_data.size(),
+                      device_stream->send_offset());
+        device_stream->AppendForSend(std::move(_device_data));
+        out->append(header, sizeof(header));
+        out->append(_meta_and_body.movable());
+        return butil::Status::OK();
+    }
+
+    size_t EstimatedByteSize() override {
+        // Device bytes are queued separately from the host write buffer.
+        return GDR_HEADER_SIZE + _meta_and_body.size();
+    }
+
+private:
+    butil::IOBuf _meta_and_body;
+    uint32_t _meta_size;
+    uint32_t _body_size;
+    DeviceAttachment _device_data;
+};
+
+// Messages whose host half has been parsed but whose device half has not
+// arrived yet. Owned by DeviceStream so switching the host stream between
+// baidu_std and streaming_rpc cannot discard these messages or their offsets.
+//
+// Strict FIFO on purpose: the device stream carries no framing, so the only
+// thing that says which bytes belong to which message is the order they were
+// cut in. Messages WITHOUT a device attachment never enter this list and are
+// dispatched immediately -- they consume zero device bytes, so letting them
+// jump the queue cannot disturb the alignment. That is what keeps one large
+// tensor transfer from adding latency to every small RPC sharing the
+// connection. See docs/cn/gdr_design.md section 8.2.
+//
+// Not locked: a Socket's input is serialized by Socket::_nevent, so only one
+// thread is ever inside the parser for a given connection.
+class GdrPendingList : public Destroyable {
+public:
+    struct Entry {
+        MostCommonMessage* msg;
+        uint64_t device_size;
+    };
+
+    GdrPendingList() : _pending_bytes(0) {}
+
+    // @Destroyable
+    void Destroy() override { delete this; }
+
+    ~GdrPendingList() override {
+        // DeviceStream destroys this during its own Reset or destruction.
+        // Do not call its pending hook while the endpoint is being torn down.
+        for (size_t i = 0; i < _list.size(); ++i) {
+            _list[i].msg->Destroy();
+        }
+    }
+
+    bool empty() const { return _list.empty(); }
+    size_t size() const { return _list.size(); }
+    const Entry& front() const { return _list.front(); }
+    uint64_t pending_bytes() const { return _pending_bytes; }
+
+    void push_back(const Entry& e) {
+        _list.push_back(e);
+        _pending_bytes += e.device_size;
+    }
+
+    void pop_front() {
+        _pending_bytes -= _list.front().device_size;
+        _list.pop_front();
+    }
+
+private:
+    std::deque<Entry> _list;
+    uint64_t _pending_bytes;
+};
+
+// Cut `entry`'s device bytes out of `stream` into its message.
+static void CutDeviceAttachment(const GdrPendingList::Entry& entry,
+                                DeviceStream* stream) {
+    const size_t moved =
+        stream->cutn(&entry.msg->device_payload, entry.device_size);
+    CHECK_EQ(moved, entry.device_size);
+}
+
 ParseResult ParseRpcMessage(butil::IOBuf* source, Socket* socket,
-                            bool /*read_eof*/, const void*) {
-    char header_buf[12];
+                            bool /*read_eof*/, const void* arg) {
+    // GDR2 requires a negotiated device channel. Ordinary PRPC messages also
+    // support a null socket, as used by the streaming response parser.
+    DeviceStream* const device_stream =
+        socket != nullptr ? socket->device_stream() : nullptr;
+    GdrPendingList* pending = nullptr;
+    if (BAIDU_UNLIKELY(device_stream != nullptr)) {
+        pending = static_cast<GdrPendingList*>(device_stream->pending_context());
+        // Phase 1: drain whatever became complete since the last call. One
+        // per call is enough -- InputMessenger keeps calling us until we
+        // report NOT_ENOUGH_DATA.
+        if (pending != nullptr && !pending->empty()) {
+            const GdrPendingList::Entry& head = pending->front();
+            if (device_stream->size() >= head.device_size) {
+                CutDeviceAttachment(head, device_stream);
+                MostCommonMessage* msg = head.msg;
+                pending->pop_front();
+                device_stream->SetPending(pending->size(),
+                                          pending->pending_bytes());
+                return MakeMessage(msg);
+            }
+            // Only the first request on a connection carries a credential.
+            // InputMessenger verifies the first *dispatched* message, so an
+            // unauthenticated server must not dispatch a later host-only RPC
+            // before this pending request has acquired its device half.
+            const Server* server = static_cast<const Server*>(arg);
+            if (!socket->CreatedByConnect() && server != nullptr &&
+                server->options().auth != nullptr &&
+                !socket->IsAuthenticated()) {
+                return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
+            }
+        }
+    }
+
+    char header_buf[GDR_HEADER_SIZE];
     const size_t n = source->copy_to(header_buf, sizeof(header_buf));
+    bool is_gdr = false;
     if (n >= 4) {
         void* dummy = header_buf;
-        if (*(const uint32_t*)dummy != *(const uint32_t*)"PRPC") {
+        if (*(const uint32_t*)dummy == *(const uint32_t*)"PRPC") {
+            // Nothing to do.
+        } else if (*(const uint32_t*)dummy == *(const uint32_t*)"GDR2") {
+            is_gdr = true;
+        } else if (*(const uint32_t*)dummy == *(const uint32_t*)"GDRB") {
+            return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG,
+                                  "Unsupported legacy GDRB framing");
+        } else {
             return MakeParseError(PARSE_ERROR_TRY_OTHERS);
         }
     } else {
-        if (memcmp(header_buf, "PRPC", n) != 0) {
+        // A prefix of either magic is still ours; only give up once it can be
+        // neither.
+        if (memcmp(header_buf, "PRPC", n) != 0 &&
+            memcmp(header_buf, "GDR2", n) != 0 &&
+            memcmp(header_buf, "GDRB", n) != 0) {
             return MakeParseError(PARSE_ERROR_TRY_OTHERS);
         }
+        return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
-    if (n < sizeof(header_buf)) {
+    if (is_gdr && device_stream == nullptr) {
+        return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG,
+                              "GDR2 requires a negotiated device channel");
+    }
+    const size_t header_size = (is_gdr ? GDR_HEADER_SIZE : RPC_HEADER_SIZE);
+    if (n < header_size) {
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
     uint32_t body_size;
     uint32_t meta_size;
+    uint32_t device_size = 0;
+    uint64_t device_offset = 0;
     butil::RawUnpacker(header_buf + 4).unpack32(body_size).unpack32(meta_size);
+    if (is_gdr) {
+        butil::RawUnpacker(header_buf + 12).unpack32(device_size)
+            .unpack64(device_offset);
+        if (device_size > rdma::MaxDeviceAttachmentSize()) {
+            return MakeParseError(PARSE_ERROR_TOO_BIG_DATA,
+                                  "Device attachment exceeds configured limit");
+        }
+        const uint64_t expected_offset = device_stream->cut_offset() +
+            (pending != nullptr ? pending->pending_bytes() : 0);
+        if (device_offset != expected_offset) {
+            return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG,
+                                  "Device stream offset mismatch");
+        }
+        if (device_size == 0) {
+            // The sender only picks GDR2 when it has device bytes to send,
+            // so this is a malformed peer. Rejecting it keeps "GDR2 implies a
+            // device half" an invariant the code below can rely on.
+            LOG(ERROR) << "GDR2 message from "
+                       << (socket != nullptr ? socket->remote_side()
+                                             : butil::EndPoint())
+                       << " declares no device bytes";
+            return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG,
+                                  "GDR2 message with device_size=0");
+        }
+    }
+    if (is_gdr && meta_size > body_size) {
+        // The device half may already be on the other QP. Discarding only
+        // the host half and trying another protocol would lose their pairing.
+        return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG,
+                              "GDR2 meta_size exceeds body_size");
+    }
     if (body_size > FLAGS_max_body_size) {
         // We need this log to report the body_size to give users some clues
         // which is not printed in InputMessenger.
         LOG(ERROR) << "body_size=" << body_size << " from "
-                   << socket->remote_side() << " is too large";
+                   << (socket != nullptr ? socket->remote_side()
+                                         : butil::EndPoint())
+                   << " is too large";
         return MakeParseError(PARSE_ERROR_TOO_BIG_DATA);
-    } else if (source->length() < sizeof(header_buf) + body_size) {
+    } else if (source->length() < header_size + body_size) {
+        // Build the message once its host half is complete; a device half
+        // that is still in flight leaves the message on the pending list.
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
     if (meta_size > body_size) {
         LOG(ERROR) << "meta_size=" << meta_size << " is bigger than body_size="
                    << body_size;
         // Pop the message
-        source->pop_front(sizeof(header_buf) + body_size);
+        source->pop_front(header_size + body_size);
         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
     }
-    source->pop_front(sizeof(header_buf));
+    source->pop_front(header_size);
     MostCommonMessage* msg = MostCommonMessage::Get();
     source->cutn(&msg->meta, meta_size);
     source->cutn(&msg->payload, body_size - meta_size);
-    return MakeMessage(msg);
+    if (BAIDU_LIKELY(!is_gdr)) {
+        // Zero device bytes consumed, so dispatching ahead of the pending
+        // list cannot disturb anyone's alignment. This is also every message
+        // on a non-GDR connection, which is why the framing rather than the
+        // meta has to say whether there is a device half: reaching this point
+        // must not cost a protobuf parse.
+        return MakeMessage(msg);
+    }
+    GdrPendingList::Entry entry = { msg, device_size };
+    if ((pending == nullptr || pending->empty()) &&
+        device_stream->size() >= entry.device_size) {
+        // Fast path: the device half is already here.
+        CutDeviceAttachment(entry, device_stream);
+        device_stream->NotifyRecvChanged();
+        return MakeMessage(msg);
+    }
+    if (pending == nullptr) {
+        pending = new GdrPendingList;
+        device_stream->reset_pending_context(pending);
+    }
+    pending->push_back(entry);
+    device_stream->SetPending(pending->size(), pending->pending_bytes());
+    // The host half was consumed successfully. Keep parsing subsequent host
+    // frames while the device half is still in flight.
+    return MakeMessage(nullptr);
 }
 
 bool SerializeRpcMessage(const google::protobuf::Message& message,
@@ -328,6 +613,29 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
         sock->SetFailed();
         return;
     }
+    if (BAIDU_UNLIKELY(cntl->response_device_attachment().size() >
+                       rdma::MaxDeviceAttachmentSize())) {
+        const size_t size = cntl->response_device_attachment().size();
+        cntl->response_device_attachment().clear();
+        cntl->SetFailed(ERESPONSE, "response device attachment size=%zu exceeds "
+                        "the configured limit=%zu", size,
+                        rdma::MaxDeviceAttachmentSize());
+    }
+    if (BAIDU_UNLIKELY(!cntl->response_device_attachment().empty() &&
+                       sock->device_stream() == nullptr)) {
+        cntl->response_device_attachment().clear();
+        cntl->SetFailed(EDEVICECHANNEL,
+                        "The connection has no negotiated device channel");
+    }
+    if (BAIDU_UNLIKELY(!cntl->response_device_attachment().empty() &&
+                       cntl->has_remote_stream())) {
+        // SendStreamData() re-frames the host buffer and cannot pair it with
+        // a device attachment. Return an ordinary RPC error for this API misuse.
+        cntl->response_device_attachment().clear();
+        cntl->SetFailed(EDEVICECHANNEL,
+                        "A stream cannot carry response_device_attachment");
+    }
+
     bool append_body = false;
     butil::IOBuf res_body;
     // `res' can be nullptr here, in which case we don't serialize it
@@ -405,18 +713,33 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
     }
 
     butil::IOBuf res_buf;
-    SerializeRpcHeaderAndMeta(&res_buf, meta, res_size + attached_size);
-    if (append_body) {
-        res_buf.append(res_body.movable());
-        if (attached_size > 0) {
-            res_buf.append(cntl->response_attachment().movable());
+    // The socket writer must queue both halves in the same outgoing order.
+    SocketMessagePtr<DeviceMessage> device_msg;
+    if (BAIDU_UNLIKELY(!cntl->response_device_attachment().empty())) {
+        butil::IOBuf body;
+        if (append_body) {
+            body.append(res_body.movable());
+            if (attached_size > 0) {
+                body.append(cntl->response_attachment().movable());
+            }
+        }
+        device_msg.reset(new DeviceMessage(
+            meta, &body, &cntl->response_device_attachment()));
+    } else {
+        SerializeRpcHeaderAndMeta(&res_buf, meta, res_size + attached_size);
+        if (append_body) {
+            res_buf.append(res_body.movable());
+            if (attached_size > 0) {
+                res_buf.append(cntl->response_attachment().movable());
+            }
         }
     }
 
     ResponseWriteInfo args;
     bthread_id_t response_id = INVALID_BTHREAD_ID;
     if (span) {
-        span->set_response_size(res_buf.size());
+        span->set_response_size(device_msg ? device_msg->EstimatedByteSize()
+                                           : res_buf.size());
         CHECK_EQ(0, bthread_id_create(&response_id, &args, HandleResponseWritten));
     }
 
@@ -472,7 +795,9 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
             wopt.id_wait = response_id;
             wopt.notify_on_success = true;
         }
-        if (sock->Write(&res_buf, &wopt) != 0) {
+        const int rc = device_msg ? sock->Write(device_msg, &wopt)
+                                  : sock->Write(&res_buf, &wopt);
+        if (rc != 0) {
             const int errcode = errno;
             PLOG_IF(WARNING, errcode != EPIPE) << "Fail to write into " << *sock;
             cntl->SetFailed(errcode, "Fail to write into %s",
@@ -647,6 +972,14 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
     cntl->set_request_checksum_type((ChecksumType)meta.checksum_type());
     cntl->set_request_checksum_attachment(meta.checksum_with_attachment());
     cntl->set_rpc_received_us(msg->received_us());
+    if (BAIDU_UNLIKELY(!msg->device_payload.empty())) {
+        // Already cut out of the device stream by the parser, so nothing here
+        // can block or fail. Moved rather than referenced so that the GPU
+        // memory is released when the Controller dies, even if the service
+        // never looks at it.
+        cntl->request_device_attachment().append(
+            std::move(msg->device_payload));
+    }
     accessor.set_checksum_value(meta.checksum_value());
     accessor.set_server(server)
         .set_security_mode(security_mode)
@@ -684,7 +1017,12 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
         span->set_protocol(PROTOCOL_BAIDU_STD);
         span->set_received_us(msg->received_us());
         span->set_start_parse_us(start_parse_us);
-        span->set_request_size(msg->payload.size() + msg->meta.size() + 12);
+        // A GDR request was framed with the longer header. The device bytes
+        // themselves are still not counted: they never entered the host
+        // stream, so this number understates a tensor RPC by design.
+        span->set_request_size(msg->payload.size() + msg->meta.size() +
+                               (cntl->request_device_attachment().empty()
+                                ? RPC_HEADER_SIZE : GDR_HEADER_SIZE));
     }
 
     MethodStatus* method_status = nullptr;
@@ -982,10 +1320,21 @@ void ProcessRpcResponse(InputMessageBase* msg_base) {
     }
 
     cntl->set_rpc_received_us(msg->received_us());
+    if (BAIDU_UNLIKELY(!msg->device_payload.empty())) {
+        // Handed over before the error branches below, so that a response
+        // that also reports a failure still frees its GPU memory with the
+        // Controller instead of leaking it into ~MostCommonMessage.
+        cntl->response_device_attachment().append(
+            std::move(msg->device_payload));
+    }
     if (auto span = accessor.span()) {
         span->set_base_real_us(msg->base_real_us());
         span->set_received_us(msg->received_us());
-        span->set_response_size(msg->meta.size() + msg->payload.size() + 12);
+        // See the matching comment in ProcessRpcRequest(): host bytes only,
+        // and the longer header when the reply carried GPU memory.
+        span->set_response_size(msg->meta.size() + msg->payload.size() +
+                                (cntl->response_device_attachment().empty()
+                                 ? RPC_HEADER_SIZE : GDR_HEADER_SIZE));
         span->set_start_parse_us(start_parse_us);
     }
     const RpcResponseMeta &response_meta = meta.response();
@@ -1095,12 +1444,26 @@ void SerializeRpcRequest(butil::IOBuf* request_buf, Controller* cntl,
 }
 
 void PackRpcRequest(butil::IOBuf* req_buf,
-                    SocketMessage**,
+                    SocketMessage** user_packet,
                     uint64_t correlation_id,
                     const google::protobuf::MethodDescriptor* method,
                     Controller* cntl,
                     const butil::IOBuf& request_body,
                     const Authenticator* auth) {
+    if (BAIDU_UNLIKELY(cntl->request_device_attachment().size() >
+                       rdma::MaxDeviceAttachmentSize())) {
+        return cntl->SetFailed(EREQUEST,
+                "request device attachment size=%zu exceeds the configured limit=%zu",
+                cntl->request_device_attachment().size(),
+                rdma::MaxDeviceAttachmentSize());
+    }
+    Socket* sock = ControllerPrivateAccessor(cntl).get_sending_socket();
+    if (BAIDU_UNLIKELY(!cntl->request_device_attachment().empty() &&
+                       sock != nullptr &&
+                       sock->socket_mode() != SOCKET_MODE_RDMA_AND_DEVICE)) {
+        return cntl->SetFailed(EDEVICECHANNEL,
+                               "Device attachments require a device channel");
+    }
     RpcMeta meta;
     if (auth && auth->GenerateCredential(
             meta.mutable_authentication_data()) != 0) {
@@ -1178,6 +1541,25 @@ void PackRpcRequest(butil::IOBuf* req_buf,
         request_meta->set_trace_id(span->trace_id());
         request_meta->set_span_id(span->span_id());
         request_meta->set_parent_span_id(span->parent_span_id());
+    }
+
+    if (BAIDU_UNLIKELY(!cntl->request_device_attachment().empty())) {
+        // The first RPC may be packed before the connection handshake.
+        // Validate its device channel in AppendAndDestroySelf(), then queue
+        // both halves from the socket writer in their final outgoing order.
+        butil::IOBuf body;
+        body.append(request_body);
+        if (attached_size) {
+            body.append(cntl->request_attachment());
+        }
+        // A reference rather than a move, for the same reason the host
+        // attachment above is copied and not moved: PackRpcRequest() runs
+        // again on every retry, and the blocks are refcounted so this costs
+        // one atomic per segment.
+        DeviceAttachment device_data;
+        device_data.append_ref(cntl->request_device_attachment());
+        *user_packet = new DeviceMessage(meta, &body, &device_data);
+        return;
     }
 
     SerializeRpcHeaderAndMeta(req_buf, meta, req_size + attached_size);

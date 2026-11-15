@@ -216,6 +216,11 @@ public:
         if (fin != nullptr) {
             // [ called from SubDone::Run() ]
 
+            if (!fin->cntl.response_device_attachment().empty()) {
+                fin->cntl.response_device_attachment().clear();
+                fin->cntl.SetFailed(EDEVICECHANNEL,
+                        "ParallelChannel does not support device attachments");
+            }
             int error_code = fin->cntl.ErrorCode();
             // EPCHANFINISH is not an error of sub calls.
             bool fail = 0 != error_code && EPCHANFINISH != error_code;
@@ -615,6 +620,11 @@ void ParallelChannel::CallMethod(
     Controller::ClientSettings settings{};
     DEFINE_SMALL_ARRAY(SubCall, aps, nchan, 64);
 
+    if (!cntl->request_device_attachment().empty()) {
+        cntl->SetFailed(EINVAL,
+                        "ParallelChannel does not support device attachments");
+        goto FAIL;
+    }
     if (cntl->FailedInline()) {
         // The call_id is cancelled before RPC.
         goto FAIL;

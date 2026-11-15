@@ -240,7 +240,12 @@ generate_unittests(
         ":cc_test_proto",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + TCMALLOC_DEP_UNLESS_ASAN,
+    ] + TCMALLOC_DEP_UNLESS_ASAN + select({
+        # brpc_rdma_unittest's end-to-end GDR test cudaMemcpy's a pattern into
+        # the device attachment it sends and reads it back out of the reply.
+        "//bazel/config:brpc_with_gdr": ["@local_cuda//:cuda_runtime"],
+        "//conditions:default": [],
+    }),
     copts = COPTS,
     # Place cert*/jsonout at <runfiles>/_main/<file> (the cwd of `bazel test`)
     # via :test_runfiles_root_data so test code can open them with plain

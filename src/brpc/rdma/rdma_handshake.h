@@ -22,6 +22,7 @@
 
 #include <memory>
 #include <infiniband/verbs.h>
+#include <gflags/gflags_declare.h>              // DECLARE_int32
 #include "butil/macros.h"
 #include "butil/containers/optional.h"
 #include "brpc/rdma/rdma_handshake_constants.h"
@@ -33,7 +34,25 @@ class IOBuf;
 namespace brpc {
 namespace rdma {
 
+DECLARE_int32(rdma_client_handshake_version);
+
 class RdmaEndpoint;
+
+// One channel's worth of what a peer advertises: its QP and the queues
+// behind it. Both channels advertise the same set of things, so both use
+// this one type -- "the peer's host RQ" and "the peer's device RQ" are the
+// same question asked of a different QP.
+//
+// lid / gid are not here: both QPs run on the same port, so those are
+// properties of the connection and stay in ParsedHello below.
+struct QpParams {
+    uint32_t qp_num;
+    // The peer's receive block size on this channel, i.e. the most one WR of
+    // ours may carry to it.
+    uint32_t block_size;
+    uint16_t sq_size;
+    uint16_t rq_size;
+};
 
 // Wire-format-agnostic representation of a peer's hello message.
 // Each protocol version (v2 binary, v3 protobuf) translates its own
@@ -41,18 +60,20 @@ class RdmaEndpoint;
 // RdmaEndpoint::ProcessHandshakeAt{Client,Server} stays free of any
 // wire-format details.
 struct ParsedHello {
-    uint32_t block_size;
-    uint16_t sq_size;
-    uint16_t rq_size;
+    QpParams host;
     uint16_t lid;
     ibv_gid  gid;
-    uint32_t qp_num;
     // ECE (Enhanced Connection Establishment), v3 handshake only.
     // nullopt means the peer did not advertise any ECE (either it disabled
     // ECE, its lib does not support ECE, or it is a v2 peer). When engaged:
     //   - on the server side: the client's queried ECE capabilities;
     //   - on the client side: the server's reduced/negotiated ECE.
     butil::optional<ibv_ece> ece;
+    // GPU Direct RDMA device channel, v3 handshake only. Mirrors
+    // RdmaDeviceChannel in rdma_handshake.proto. nullopt means the peer
+    // cannot carry device attachments, so the connection stays host-only. A
+    // v2 peer is always nullopt.
+    butil::optional<QpParams> device;
 };
 
 // Result of reading/parsing a peer's hello (see ReceiveAndParseRemoteHello).

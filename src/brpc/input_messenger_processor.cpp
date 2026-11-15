@@ -22,6 +22,7 @@
 #include "brpc/transport.h"
 #include "brpc/input_messenger_processor.h"
 #include "brpc/input_messenger.h"
+#include "brpc/device_attachment.h"
 
 namespace brpc {
 
@@ -64,6 +65,28 @@ ParseResult InputMessengerProcessor::CutInputMessage(InputMessenger* messenger,
     InputMessageHandler* handlers = messenger->_handlers;
     int preferred = _socket->preferred_index();
     int max_index = (int)messenger->_max_index.load(butil::memory_order_acquire);
+    if (preferred == PROTOCOL_STREAMING_RPC &&
+        PROTOCOL_BAIDU_STD <= max_index &&
+        handlers[PROTOCOL_BAIDU_STD].parse != nullptr) {
+        DeviceStream* stream = _socket->device_stream();
+        if (stream != nullptr && stream->pending_msgs() != 0) {
+            // Device completions can finish a baidu_std message without any
+            // new host bytes. The streaming parser would otherwise report
+            // NOT_ENOUGH_DATA on an empty host buffer forever. Drain only
+            // already-parsed messages, leaving actual STRM bytes untouched.
+            butil::IOBuf empty;
+            ParseResult result = handlers[PROTOCOL_BAIDU_STD].parse(
+                    &empty, _socket, read_eof,
+                    handlers[PROTOCOL_BAIDU_STD].arg);
+            if (result.is_ok()) {
+                *index = PROTOCOL_BAIDU_STD;
+                return result;
+            }
+            if (result.error() != PARSE_ERROR_NOT_ENOUGH_DATA) {
+                return result;
+            }
+        }
+    }
     // Try preferred handler first. The preferred_index is set on last
     // selection or by client.
     if (preferred >= 0 && preferred <= max_index
@@ -281,7 +304,7 @@ int InputMessengerProcessor::ProcessNewMessage(ssize_t bytes, bool read_eof,
     // not in the bthread where the polling bthread is located, because the
     // method for processing messages may call synchronization primitives,
     // causing the polling bthread to be scheduled out.
-    if (_socket->_socket_mode == SOCKET_MODE_RDMA ||
+    if (IsRdmaSocketMode(_socket->_socket_mode) ||
         _socket->_socket_mode == SOCKET_MODE_UBRING ||
         _socket->_socket_mode == SOCKET_MODE_URMA) {
         _socket->_transport->QueueMessage(last_msg, &num_bthread_created, true);

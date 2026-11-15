@@ -48,6 +48,7 @@
 #include "brpc/grpc.h"
 #include "brpc/kvmap.h"
 #include "brpc/rpc_dump.h"
+#include "brpc/device_attachment.h"            // DeviceAttachment
 
 // EAUTH is defined in MAC
 #ifndef EAUTH
@@ -173,6 +174,9 @@ friend void policy::ProcessThriftRequest(InputMessageBase*);
     // Whether set_response_checksum_type()'s checksum also covers the
     // attachment. See set_response_checksum_attachment().
     static const uint32_t FLAGS_RESPONSE_CHECKSUM_WITH_ATTACHMENT = (1 << 24);
+    // The completing call's device-channel state, retained after its Socket
+    // reference is released. Reset() clears it with the other flags.
+    static const uint32_t FLAGS_HAS_DEVICE_CHANNEL = (1 << 25);
 
 public:
     struct Inheritable {
@@ -333,6 +337,21 @@ public:
     // directly instead of being serialized into protobuf messages.
     butil::IOBuf& request_attachment() { return _request_attachment; }
 
+    // Bulk data attached to the request, sent over the connection's second QP
+    // without ever being staged through an IOBuf. Normally GPU memory, which
+    // is what the second channel exists for, but the two ends decide that
+    // independently and either may be host memory -- see
+    // -rdma_attachment_memory and DeviceAttachment::Segment::is_host.
+    //
+    // Only baidu_std over a negotiated second channel carries this.
+    // Configure SOCKET_MODE_RDMA_AND_DEVICE on the client and enable it on
+    // the server. The client rejects a connection without the second channel
+    // with EDEVICECHANNEL; the server can still serve ordinary clients.
+    // Sending a device attachment on any other connection also fails it.
+    // See docs/cn/gdr_design.md.
+    DeviceAttachment& request_device_attachment()
+    { return _request_device_attachment; }
+
     ConnectionType connection_type() const { return _connection_type; }
     // Get the called method. May-be nullptr for non-pb services.
     const google::protobuf::MethodDescriptor* method() const { return _method; }
@@ -491,6 +510,24 @@ public:
     // directly instead of being serialized into protobuf messages.
     butil::IOBuf& response_attachment() { return _response_attachment; }
 
+    // Bulk data attached to the response. Same as
+    // request_device_attachment(), except that the server already knows the
+    // connection, so has_device_channel() tells it whether this is supported.
+    // Combining a device attachment with a stream is unsupported because
+    // SendStreamData() re-frames the buffer and device lengths are per message.
+    DeviceAttachment& response_device_attachment()
+    { return _response_device_attachment; }
+
+    // Whether the connection this RPC is being served on / was sent on
+    // negotiated a second channel and can carry device attachments. Says
+    // nothing about what either end's attachments are made of -- that is
+    // never negotiated.
+    //
+    // Meaningful on the server side and after a client-side RPC finishes.
+    // Before a client-side call the socket has not been picked yet, so this
+    // is false and says nothing about what the eventual peer supports.
+    bool has_device_channel() const;
+
     // Response Body of a failed HTTP call is set to be ErrorText() by default,
     // even if response_attachment() is non-empty.
     // If this flag is true, the http body of a failed HTTP call will not be
@@ -623,6 +660,10 @@ public:
 
     const butil::IOBuf& request_attachment() const { return _request_attachment; }
     const butil::IOBuf& response_attachment() const { return _response_attachment; }
+    const DeviceAttachment& request_device_attachment() const
+    { return _request_device_attachment; }
+    const DeviceAttachment& response_device_attachment() const
+    { return _response_device_attachment; }
 
     // Get the object to write key/value which will be flushed into
     // LOG(INFO) when this controller is deleted.
@@ -975,9 +1016,14 @@ private:
 
     std::unique_ptr<KVMap> _session_kv;
 
-    // Fields with large size but low access frequency 
+    // Fields with large size but low access frequency
     butil::IOBuf _request_attachment;
     butil::IOBuf _response_attachment;
+
+    // Empty (and free) unless the caller actually uses GDR: a default
+    // DeviceAttachment is just an empty vector plus a size.
+    DeviceAttachment _request_device_attachment;
+    DeviceAttachment _response_device_attachment;
 
     // Only SerializedRequest supports `_request_content_type'.
     ContentType _request_content_type;

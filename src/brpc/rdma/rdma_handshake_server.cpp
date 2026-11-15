@@ -208,7 +208,7 @@ ParseResult ExecuteServerHandshake(butil::IOBuf* source, Socket* socket) {
     // handshake. A connection that is not in RDMA mode (RDMA compiled in but
     // this connection is plain TCP, or RDMA not compiled at all) falls back.
 #if BRPC_WITH_RDMA
-    if (socket->socket_mode() == SOCKET_MODE_RDMA) {
+    if (IsRdmaSocketMode(socket->socket_mode())) {
         return RdmaEndpoint::ExecuteServerHandshake(source, socket);
     }
 #endif

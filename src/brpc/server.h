@@ -238,7 +238,10 @@ struct ServerOptions {
     // Force ssl for all connections of the port to Start().
     bool force_ssl;
 
-    // Transport used by accepted sockets.
+    // Which transport the connections accepted on this port use: TCP, RDMA,
+    // RDMA plus the device channel (SOCKET_MODE_RDMA_AND_DEVICE, which here
+    // means "may agree to a client that asks for one" -- see socket_mode.h),
+    // URMA, or UB shared memory.
     // Default: SOCKET_MODE_TCP
     SocketMode socket_mode;
 
